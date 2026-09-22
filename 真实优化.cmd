@@ -7,5 +7,5 @@ if "%~1"=="" (
   pause
   exit /b 1
 )
-node scripts\cli.mjs run --job "%~1" --adapter codex --iterations 1
+node scripts\cli.mjs run --job "%~1" --adapter configured --models config\models.local.json --iterations 1
 pause

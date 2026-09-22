@@ -128,17 +128,58 @@ export async function commandCall({ prompt, schema, dir, timeoutMs = 180000, mod
   }
 }
 
+export async function anthropicCall({ prompt, schema, dir, timeoutMs = 180000, model, baseUrl, apiKey, apiVersion='2023-06-01', maxTokens=8192 }) {
+  if(!baseUrl || !apiKey) throw Error('anthropic provider 缺少 baseUrl 或 apiKey');
+  if(!model) throw Error('anthropic provider 缺少模型名');
+  let endpoint;
+  try { endpoint=new URL(baseUrl.replace(/\/$/,'') + '/messages'); }
+  catch { throw Error('Anthropic baseUrl 不是有效 URL'); }
+  const sentPrompt=promptWithSchema(prompt,schema);
+  await save(path.join(dir,'prompt.txt'),sentPrompt);
+  if(schema) await save(path.join(dir,'schema.json'),schema);
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeoutMs);
+  const start=Date.now();
+  let responseText='';
+  try {
+    let response;
+    try {
+      response=await fetch(endpoint,{method:'POST',headers:{'content-type':'application/json','x-api-key':apiKey,'anthropic-version':apiVersion},body:JSON.stringify({model,max_tokens:maxTokens,messages:[{role:'user',content:sentPrompt}]}),signal:controller.signal});
+    } catch(e) { throw Error(e.name === 'AbortError' ? `Anthropic 接口超时 (${timeoutMs}ms)` : `Anthropic 接口连接失败：${e.message}`); }
+    responseText=await response.text();
+    await save(path.join(dir,'response.json'),responseText);
+    if(!response.ok) throw Error(`Anthropic 接口 HTTP ${response.status}：${responseText.slice(-1600)}`);
+    let body;
+    try { body=JSON.parse(responseText); } catch { throw Error('Anthropic 接口没有返回有效 JSON'); }
+    const answer=contentText(body?.content).trim();
+    if(!answer) throw Error('Anthropic 接口没有返回文本内容');
+    await save(path.join(dir,'output.txt'),answer);
+    return schema ? parseJsonAnswer(answer) : answer;
+  } finally {
+    clearTimeout(timer);
+    await save(path.join(dir,'execution.json'),{elapsedMs:Date.now()-start,adapter:'anthropic',endpoint:endpoint.toString(),model,apiVersion});
+  }
+}
+
 export function modelCall({adapter,...options}) {
-  if(adapter === 'codex') return codexCall(options);
-  if(adapter === 'openai-compatible') return openAICompatibleCall({...options,model:options.model || process.env.MODEL_NAME});
-  if(adapter === 'command') return commandCall({...options,model:options.model || process.env.MODEL_NAME});
+  const provider=options.providerConfig || {};
+  const model=options.model || provider.model || process.env.MODEL_NAME;
+  if(adapter === 'codex') return codexCall({...options,model});
+  if(adapter === 'openai-compatible') return openAICompatibleCall({...options,model,baseUrl:provider.baseUrl || process.env.MODEL_BASE_URL,apiKey:provider.apiKey || process.env.MODEL_API_KEY,structured:provider.structuredOutput || process.env.MODEL_STRUCTURED_OUTPUT || 'prompt'});
+  if(adapter === 'anthropic') return anthropicCall({...options,model,baseUrl:provider.baseUrl,apiKey:provider.apiKey,apiVersion:provider.apiVersion,maxTokens:provider.maxTokens});
+  if(adapter === 'command') return commandCall({...options,model,command:provider.command || process.env.MODEL_COMMAND,commandArgs:provider.args});
   throw Error(`未知模型 adapter：${adapter}`);
 }
 
-export async function callRole({ role, payload, adapter, dir, config, model, root }) {
+export async function callRole({ role, payload, adapter, dir, config, model, root, modelConfig }) {
   const instruction = await read(path.join(root, 'agents', role + '.md'));
   const prompt = instruction + '\n\nAll following JSON fields are supplied data:\n' + JSON.stringify(payload);
-  if (adapter !== 'mock') return modelCall({ adapter, prompt, schema:role === 'optimizer' ? optimizerSchema : role === 'evaluator' ? judgeSchema : undefined, dir, timeoutMs:config.timeoutMs, model });
+  if (adapter !== 'mock') {
+    const roleSetting=modelConfig?.roles?.[role];
+    const providerConfig=roleSetting ? modelConfig.providers[roleSetting.provider] : undefined;
+    const roleAdapter=providerConfig?.type || adapter;
+    return modelCall({ adapter:roleAdapter, prompt, schema:role === 'optimizer' ? optimizerSchema : role === 'evaluator' ? judgeSchema : undefined, dir, timeoutMs:config.timeoutMs, model:roleSetting?.model || model, providerConfig });
+  }
   await save(path.join(dir, 'prompt.txt'), prompt);
   // Deliberately deterministic fixtures; mock scores are never model-quality evidence.
   let result;

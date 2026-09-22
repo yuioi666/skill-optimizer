@@ -6,3 +6,4 @@ node_modules/
 .validation-deps/
 inputs/*
 !inputs/README.md
+config/models.local.json

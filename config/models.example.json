@@ -1,0 +1,25 @@
+{
+  "providers": {
+    "codex-local": {
+      "type": "codex",
+      "model": ""
+    },
+    "local-openai-compatible": {
+      "type": "openai-compatible",
+      "baseUrl": "http://localhost:11434/v1",
+      "apiKey": "",
+      "structuredOutput": "prompt"
+    },
+    "anthropic-cloud": {
+      "type": "anthropic",
+      "baseUrl": "https://api.anthropic.com/v1",
+      "apiKey": "在本地配置中填写",
+      "apiVersion": "2023-06-01"
+    }
+  },
+  "roles": {
+    "runner": { "provider": "codex-local", "model": "" },
+    "optimizer": { "provider": "codex-local", "model": "" },
+    "evaluator": { "provider": "codex-local", "model": "" }
+  }
+}

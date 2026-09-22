@@ -38,6 +38,35 @@ export async function loadJob(dir) {
   }
   return { config, skill, sets };
 }
+export async function loadModelConfig(file) {
+  const config=await json(file);
+  if(!config?.providers || typeof config.providers !== 'object' || Array.isArray(config.providers)) throw Error('模型配置缺少 providers');
+  if(!config?.roles || typeof config.roles !== 'object' || Array.isArray(config.roles)) throw Error('模型配置缺少 roles');
+  const types=new Set(['codex','openai-compatible','anthropic','command']);
+  for(const [name,provider] of Object.entries(config.providers)) {
+    if(!name || !provider || !types.has(provider.type)) throw Error(`模型 provider 无效：${name}`);
+  }
+  const used=new Set();
+  for(const role of ['runner','optimizer','evaluator']) {
+    const setting=config.roles[role];
+    if(!setting || !config.providers[setting.provider]) throw Error(`角色 ${role} 没有引用有效 provider`);
+    used.add(setting.provider);
+  }
+  for(const name of used) {
+    const provider=config.providers[name];
+    if(provider.type === 'openai-compatible' && !provider.baseUrl) throw Error(`provider ${name} 缺少 baseUrl`);
+    if(provider.type === 'anthropic' && (!provider.baseUrl || !provider.apiKey || provider.apiKey === '在本地配置中填写')) throw Error(`provider ${name} 缺少可用的 baseUrl 或 apiKey`);
+    if(provider.type === 'command' && !provider.command) throw Error(`provider ${name} 缺少 command`);
+  }
+  return config;
+}
+
+export function publicModelConfig(config) {
+  return Object.fromEntries(Object.entries(config.roles).map(([role,setting])=>{
+    const provider=config.providers[setting.provider];
+    return [role,{provider:setting.provider,type:provider.type,model:setting.model || provider.model || null}];
+  }));
+}
 export function checks(output, rules) {
   const failures = [];
   if (!output.trim()) failures.push('输出为空');

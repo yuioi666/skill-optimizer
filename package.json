@@ -7,11 +7,14 @@
   "scripts": {
     "test": "node --test",
     "validate": "node scripts/cli.mjs validate",
-    "doctor": "node scripts/cli.mjs doctor",
+    "doctor": "node scripts/cli.mjs doctor --adapter configured --models config/models.local.json",
+    "doctor:codex": "node scripts/cli.mjs doctor --adapter codex",
     "demo": "node scripts/cli.mjs run --adapter mock",
-    "optimize": "node scripts/cli.mjs run --adapter codex",
+    "optimize": "node scripts/cli.mjs run --adapter configured --models config/models.local.json",
+    "optimize:codex": "node scripts/cli.mjs run --adapter codex",
     "optimize:api": "node scripts/cli.mjs run --adapter openai-compatible",
     "optimize:command": "node scripts/cli.mjs run --adapter command",
-    "smoke": "node scripts/cli.mjs smoke"
+    "smoke": "node scripts/cli.mjs smoke --adapter configured --models config/models.local.json",
+    "smoke:codex": "node scripts/cli.mjs smoke --adapter codex"
   }
 }

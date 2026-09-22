@@ -1,0 +1,7 @@
+interface:
+  display_name: "Skill 优化工作台"
+  short_description: "在桌面端协调多 Agent 测试、评审并优化 Skill"
+  brand_color: "#4F46E5"
+  default_prompt: "使用 $skill-optimizer-workbench 根据我的需求测试并优化这个 Skill。"
+policy:
+  allow_implicit_invocation: true

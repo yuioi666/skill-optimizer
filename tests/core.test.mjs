@@ -4,7 +4,7 @@ import { mkdtemp, cp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { checks, grade, eligible, loadJob } from '../scripts/core.mjs';
+import { checks, grade, eligible, loadJob, loadModelConfig, publicModelConfig } from '../scripts/core.mjs';
 
 test('确定性失败不得被高分掩盖',()=>{
   const hard=checks('已启动广告投放',{includes:['待确认'],excludes:['已启动广告投放']});
@@ -52,4 +52,26 @@ test('真实优化必须明确指定 inputs 任务目录',()=>{
   const result=spawnSync(process.execPath,['scripts/cli.mjs','run','--adapter','codex'],{encoding:'utf8',timeout:10000});
   assert.equal(result.status,1);
   assert.match(result.stderr,/必须指定任务目录/);
+});
+test('模型配置允许未使用的 provider 模板且公开视图不含密钥',async()=>{
+  const config=await loadModelConfig('config/models.example.json');
+  const visible=JSON.stringify(publicModelConfig(config));
+  assert.equal(visible.includes('在本地配置中填写'),false);
+  assert.equal(visible.includes('apiKey'),false);
+});
+test('按角色模型配置可以完成端到端评估',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'skill-configured-'));
+  const jobDir=path.join(dir,'job');
+  await cp('examples/meeting-summary',jobDir,{recursive:true});
+  const program=`let d='';process.stdin.on('data',x=>d+=x);process.stdin.on('end',()=>{const marker='All following JSON fields are supplied data:\\n';const raw=d.slice(d.indexOf(marker)+marker.length).split('\\n\\nReturn only JSON matching this schema.')[0];const p=JSON.parse(raw);if(d.startsWith('Improve'))process.stdout.write(JSON.stringify({skill:'---\\nname: meeting-summary\\ndescription: 测试会议摘要。\\n---\\n\\n行动项缺失信息标为待确认。',rationale:'test'}));else if(d.startsWith('Evaluate'))process.stdout.write(JSON.stringify({scores:p.rubric.map(r=>({id:r.id,score:4,evidence:'test evidence'}))}));else process.stdout.write(p.input+'\\n待确认');});`;
+  const models=path.join(dir,'models.json');
+  await writeFile(models,JSON.stringify({providers:{local:{type:'command',command:process.execPath,args:['-e',program]}},roles:{runner:{provider:'local'},optimizer:{provider:'local'},evaluator:{provider:'local'}}}));
+  const result=spawnSync(process.execPath,['scripts/cli.mjs','run','--job',jobDir,'--models',models,'--iterations','1'],{encoding:'utf8',timeout:30000});
+  assert.equal(result.status,0,result.stderr);
+  const runDir=result.stdout.match(/运行目录：([^\r\n]+)/)[1];
+  const report=JSON.parse(await readFile(path.join(runDir,'report.json'),'utf8'));
+  const manifest=JSON.parse(await readFile(path.join(runDir,'manifest.json'),'utf8'));
+  assert.equal(report.status,'passed');
+  assert.equal(manifest.models.optimizer.type,'command');
+  assert.equal(await readFile(path.join(runDir,'status.md'),'utf8').then(x=>x.includes('已结束')),true);
 });
