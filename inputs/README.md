@@ -26,4 +26,6 @@ node scripts/cli.mjs validate --job inputs/my-skill
 npm run optimize -- --job inputs/my-skill --iterations 1
 ```
 
+如需使用其他模型，可将 `optimize` 换成 `optimize:api` 或 `optimize:command`；具体环境变量见项目根目录的 `README.md`。
+
 当前版本只评估 `SKILL.md` 的文本行为，不会执行 Skill 附带脚本或测试外部项目。`inputs/` 下除本说明外的内容默认被 Git 忽略。

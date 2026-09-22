@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { loadJob, save, hash, checks, grade, eligible, validateSkill } from './core.mjs';
-import { callRole, codexCall, objectSchema } from './adapter.mjs';
+import { callRole, modelCall, objectSchema } from './adapter.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const [command = 'validate', ...args] = process.argv.slice(2);
@@ -14,7 +14,7 @@ for (let i=0; i<args.length; i+=2) {
 }
 const jobDir = path.resolve(options.job || path.join(root, 'examples/meeting-summary'));
 const adapter = options.adapter || 'mock';
-if (!['mock','codex'].includes(adapter)) throw Error('adapter 只能为 mock 或 codex');
+if (!['mock','codex','openai-compatible','command'].includes(adapter)) throw Error('adapter 只能为 mock、codex、openai-compatible 或 command');
 let runDir;
 
 async function evaluate(cases, skill, dir, config) {
@@ -33,8 +33,8 @@ async function evaluate(cases, skill, dir, config) {
 }
 
 async function run() {
-  if (adapter === 'codex' && !options.job) {
-    throw Error('真实优化必须指定任务目录，例如：npm run optimize -- --job inputs/my-skill --iterations 1');
+  if (adapter !== 'mock' && !options.job) {
+    throw Error(`真实优化必须指定任务目录，例如：node scripts/cli.mjs run --job inputs/my-skill --adapter ${adapter} --iterations 1`);
   }
   const job = await loadJob(jobDir);
   const config = {...job.config};
@@ -46,11 +46,11 @@ async function run() {
   const id = new Date().toISOString().replace(/[:.]/g,'-') + '-' + adapter + '-' + process.pid;
   runDir = path.join(root,'runs',id);
   await mkdir(runDir,{recursive:true});
-  await save(path.join(runDir,'manifest.json'), { id, adapter, model:options.model || 'Codex 本机默认配置', config, skillHash:hash(job.skill), datasetHashes:Object.fromEntries(Object.entries(job.sets).map(([k,v])=>[k,hash(JSON.stringify(v))])), startedAt:new Date().toISOString() });
+  await save(path.join(runDir,'manifest.json'), { id, adapter, model:options.model || process.env.MODEL_NAME || (adapter === 'codex' ? 'Codex 本机默认配置' : null), config, skillHash:hash(job.skill), datasetHashes:Object.fromEntries(Object.entries(job.sets).map(([k,v])=>[k,hash(JSON.stringify(v))])), startedAt:new Date().toISOString() });
   await save(path.join(runDir,'original','SKILL.md'), job.skill);
   // Keep an exact local snapshot for reproducibility, never include hidden data in optimizer prompts.
   await save(path.join(runDir,'dataset-snapshot.json'),job.sets);
-  console.log(`运行目录：${runDir}\n模式：${adapter === 'mock' ? '模拟演示（不代表真实质量）' : '真实 Codex'}`);
+  console.log(`运行目录：${runDir}\n模式：${adapter === 'mock' ? '模拟演示（不代表真实质量）' : `真实模型（${adapter}）`}`);
   const baselineDev = await evaluate(job.sets.development,job.skill,path.join(runDir,'baseline-development'),config);
   const baselineReg = await evaluate(job.sets.regression,job.skill,path.join(runDir,'baseline-regression'),config);
   let skill = job.skill, feedback = baselineDev, selected = null;
@@ -84,7 +84,7 @@ async function run() {
   for (const [label,results] of [['原版开发集',baselineDev],['原版回归集',baselineReg],...iterations.flatMap(i=>[[`第 ${i.iteration} 轮开发集`,i.dev],[`第 ${i.iteration} 轮回归集`,i.reg]]),['原版保留集',baselineHoldout],['候选保留集',holdout]]) {
     for (const r of results || []) rows.push(`| ${label} | ${r.id} | ${(r.score*100).toFixed(1)}% | ${r.hard.passed ? '通过' : r.hard.failures.join('；')} |`);
   }
-  const markdown=`# Skill 评估报告\n\n运行：${id}\n\n模式：${adapter === 'mock' ? '模拟演示，分数不可用于判断实际能力' : '真实 Codex 执行与模型评审'}\n\n结果：${status}\n\n| 阶段 | 案例 | 评分 | 确定性检查 |\n|---|---|---:|---|\n${rows.join('\n')}\n\n本报告是文本任务小样本验证，不代表技能自动触发、脚本执行或文件产物质量。模型评分存在波动。保留集结果不用于本轮优化；若根据该结果改进，需要更换新的保留集。\n`;
+  const markdown=`# Skill 评估报告\n\n运行：${id}\n\n模式：${adapter === 'mock' ? '模拟演示，分数不可用于判断实际能力' : `真实模型执行与模型评审（${adapter}）`}\n\n结果：${status}\n\n| 阶段 | 案例 | 评分 | 确定性检查 |\n|---|---|---:|---|\n${rows.join('\n')}\n\n本报告是文本任务小样本验证，不代表技能自动触发、脚本执行或文件产物质量。模型评分存在波动。保留集结果不用于本轮优化；若根据该结果改进，需要更换新的保留集。\n`;
   await save(path.join(runDir,'report.md'),markdown);
   if (passed) {
     const finalDir=path.join(root,'final',id);
@@ -103,17 +103,32 @@ try {
   } else if (command === 'doctor') {
     console.log(`Node ${process.version}`);
     let failed=false;
-    for (const [exe,params] of [['git',['--version']],[process.env.CODEX_BIN || 'codex',['--version']],[process.env.CODEX_BIN || 'codex',['login','status']]]) {
+    const doctorAdapter=options.adapter || 'codex';
+    const commands=[['git',['--version']]];
+    if(doctorAdapter === 'codex') commands.push([process.env.CODEX_BIN || 'codex',['--version']],[process.env.CODEX_BIN || 'codex',['login','status']]);
+    for (const [exe,params] of commands) {
       const r=spawnSync(exe,params,{encoding:'utf8',shell:false,windowsHide:true,timeout:15000});
       console.log(`${exe} ${params.join(' ')}\n${r.stdout || ''}${r.stderr || ''}${r.error?.message || ''}`);
       if(r.status !== 0) failed=true;
     }
+    if(doctorAdapter === 'openai-compatible') {
+      console.log(`MODEL_BASE_URL: ${process.env.MODEL_BASE_URL || '未设置'}\nMODEL_NAME/--model: ${options.model || process.env.MODEL_NAME || '未设置'}`);
+      if(!process.env.MODEL_BASE_URL || !(options.model || process.env.MODEL_NAME)) failed=true;
+    }
+    if(doctorAdapter === 'command') {
+      console.log(`MODEL_COMMAND: ${process.env.MODEL_COMMAND || '未设置'}\nMODEL_NAME/--model: ${options.model || process.env.MODEL_NAME || '可选'}`);
+      if(!process.env.MODEL_COMMAND) failed=true;
+      try { const a=JSON.parse(process.env.MODEL_ARGS_JSON || '[]'); if(!Array.isArray(a) || a.some(x=>typeof x !== 'string')) failed=true; }
+      catch { console.log('MODEL_ARGS_JSON 不是有效的 JSON 字符串数组'); failed=true; }
+    }
     if(failed) process.exitCode=1;
   } else if (command === 'smoke') {
     runDir=path.join(root,'runs','smoke-'+Date.now());
-    const result=await codexCall({prompt:'Do not use tools. Return the JSON object {"ok":true}.',schema:objectSchema({ok:{type:'boolean'}}),dir:runDir,timeoutMs:60000,model:options.model});
+    const smokeAdapter=options.adapter || 'codex';
+    if(smokeAdapter === 'mock') throw Error('smoke 不支持 mock adapter');
+    const result=await modelCall({adapter:smokeAdapter,prompt:'Do not use tools. Return the JSON object {"ok":true}.',schema:objectSchema({ok:{type:'boolean'}}),dir:runDir,timeoutMs:60000,model:options.model});
     if(result.ok !== true) throw Error('连接测试响应不正确');
-    console.log(`Codex 真实调用成功。记录：${runDir}`);
+    console.log(`${smokeAdapter} 真实调用成功。记录：${runDir}`);
   } else if (command === 'run') await run();
   else throw Error('命令：validate / doctor / demo（使用 npm run demo）/ run / smoke');
 } catch(e) {

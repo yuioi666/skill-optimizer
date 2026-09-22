@@ -10,6 +10,8 @@
     "doctor": "node scripts/cli.mjs doctor",
     "demo": "node scripts/cli.mjs run --adapter mock",
     "optimize": "node scripts/cli.mjs run --adapter codex",
+    "optimize:api": "node scripts/cli.mjs run --adapter openai-compatible",
+    "optimize:command": "node scripts/cli.mjs run --adapter command",
     "smoke": "node scripts/cli.mjs smoke"
   }
 }
