@@ -33,6 +33,9 @@ async function evaluate(cases, skill, dir, config) {
 }
 
 async function run() {
+  if (adapter === 'codex' && !options.job) {
+    throw Error('真实优化必须指定任务目录，例如：npm run optimize -- --job inputs/my-skill --iterations 1');
+  }
   const job = await loadJob(jobDir);
   const config = {...job.config};
   if (options.iterations) {

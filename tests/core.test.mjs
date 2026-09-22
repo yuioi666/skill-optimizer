@@ -48,3 +48,8 @@ test('模拟流程端到端运行，保留集不进入优化器提示',async()=>
   const job=await loadJob('examples/meeting-summary');
   for(const c of [...job.sets.regression,...job.sets.holdout]) assert.equal(prompt.includes(c.input),false);
 });
+test('真实优化必须明确指定 inputs 任务目录',()=>{
+  const result=spawnSync(process.execPath,['scripts/cli.mjs','run','--adapter','codex'],{encoding:'utf8',timeout:10000});
+  assert.equal(result.status,1);
+  assert.match(result.stderr,/必须指定任务目录/);
+});

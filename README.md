@@ -19,23 +19,32 @@ npm run demo
 
 ```powershell
 npm run smoke
-npm run optimize -- --iterations 1
+npm run optimize -- --job inputs/my-skill --iterations 1
 ```
 
-也可双击 `真实优化.cmd`。真实运行使用本机 Codex 登录和默认模型，会消耗账号额度。`--model 模型名` 可以显式指定本机可用模型。默认示例一轮最多需要 17 次模型调用（第二轮另加 7 次），每次默认最多 3 分钟。若原版已达到门槛，候选版允许持平，报告不会把持平称作提升。
+也可将任务目录拖到 `真实优化.cmd` 上运行。真实优化必须明确指定 `inputs/` 下的任务，不会默认运行会议摘要示例。真实运行使用本机 Codex 登录和默认模型，会消耗账号额度。`--model 模型名` 可以显式指定本机可用模型。默认示例一轮最多需要 17 次模型调用（第二轮另加 7 次），每次默认最多 3 分钟。若原版已达到门槛，候选版允许持平，报告不会把持平称作提升。
 
 ## 换成自己的 Skill
 
-1. 复制 `examples/meeting-summary` 为新的任务目录。
-2. 将你的 Skill 正文放进该目录下的 `original-skill/SKILL.md`。
-3. 修改 `job.json` 中需求、评分标准、门槛和最多迭代次数。
-4. 修改三个 JSONL 案例文件，每行一个 JSON 对象，分别用于开发、回归和保留测试。输入及 ID 不允许重复。
-5. 执行下面的命令。
+`examples/` 只保存演示，`inputs/` 保存你自己的评估任务。先复制示例结构：
 
 ```powershell
-node scripts/cli.mjs validate --job examples/my-skill
-node scripts/cli.mjs run --job examples/my-skill --adapter codex --iterations 1
+Copy-Item examples/meeting-summary inputs/my-skill -Recurse
 ```
+
+然后：
+
+1. 将你的 Skill 正文放进 `inputs/my-skill/original-skill/SKILL.md`。
+2. 修改 `job.json` 中需求、评分标准、门槛和最多迭代次数。
+3. 修改三个 JSONL 案例文件，每行一个 JSON 对象，分别用于开发、回归和保留测试。输入及 ID 不允许重复。
+4. 执行下面的命令。
+
+```powershell
+node scripts/cli.mjs validate --job inputs/my-skill
+npm run optimize -- --job inputs/my-skill --iterations 1
+```
+
+`inputs/` 下的个人任务默认不提交到 Git，避免把私有 Skill 或测试材料意外上传。需要纳入版本管理时，可以调整 `.gitignore`。
 
 检查支持 `includes` 必须包含、`excludes` 禁止包含、`maxChars` 字数上限。文本匹配是字面检查，要避免禁止词同时出现在合理的否定句中。模型评分按 `rubric` 各维度等权计算，0–4 分归一化；每个案例必须达到门槛、通过确定性检查且不低于原版同一案例。
 
