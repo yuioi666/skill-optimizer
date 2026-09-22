@@ -1,0 +1,13 @@
+{
+  "name": "meeting-summary",
+  "requirements": "根据原文输出中文会议摘要，包含结论和行动项。行动项逐项说明任务、负责人和截止时间。原文缺失的负责人或时间填写待确认，不补造事实。区分已决定和仅讨论的事项。",
+  "rubric": [
+    { "id": "faithfulness", "description": "所有事实均有原文支持；保留否定、未决和缺失信息" },
+    { "id": "actions", "description": "完整提取行动项，标明任务、负责人、时间，缺失项标待确认" },
+    { "id": "clarity", "description": "结论和行动项清楚可读，无无关内容" }
+  ],
+  "threshold": 0.8,
+  "maxIterations": 2,
+  "timeoutMs": 180000,
+  "skill": "original-skill/SKILL.md"
+}

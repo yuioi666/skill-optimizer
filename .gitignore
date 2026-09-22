@@ -1,0 +1,6 @@
+runs/
+final/
+node_modules/
+.env
+*.log
+.validation-deps/
