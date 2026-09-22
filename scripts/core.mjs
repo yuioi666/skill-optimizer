@@ -19,6 +19,8 @@ export async function loadJob(dir) {
   if (!config.name || typeof config.requirements !== 'string' || !config.requirements.trim()) throw Error('缺少名称或需求');
   if (!Array.isArray(config.rubric) || !config.rubric.length || config.rubric.some(c => !/^[a-z][a-z0-9_-]*$/.test(c.id) || !c.description) || new Set(config.rubric.map(c=>c.id)).size !== config.rubric.length) throw Error('评分标准无效');
   if (!(config.threshold > 0 && config.threshold <= 1) || !Number.isInteger(config.maxIterations) || config.maxIterations < 1 || config.maxIterations > 10 || !Number.isInteger(config.timeoutMs) || config.timeoutMs < 1000) throw Error('阈值、迭代次数或超时无效');
+  if (config.comparisonMode !== undefined && !['skill-vs-none','original-vs-candidate','all'].includes(config.comparisonMode)) throw Error('comparisonMode 必须为 skill-vs-none、original-vs-candidate 或 all');
+  if (config.compareWithoutSkill !== undefined && typeof config.compareWithoutSkill !== 'boolean') throw Error('compareWithoutSkill 必须为布尔值');
   if (typeof config.skill !== 'string' || path.isAbsolute(config.skill) || config.skill.split(/[\\/]/).includes('..')) throw Error('Skill 路径必须位于任务目录');
   const skill = await read(path.join(dir, config.skill));
   validateSkill(skill);
@@ -86,4 +88,25 @@ export function grade(value, rubric) {
 export function eligible(candidate, baseline, threshold) {
   if (!candidate.length || candidate.length !== baseline.length || new Set(candidate.map(c=>c.id)).size !== candidate.length) return false;
   return candidate.every(c => c.hard.passed && c.score >= threshold && c.score >= baseline.find(b => b.id === c.id)?.score);
+}
+
+export function compareResults(subject, baseline) {
+  if (!Array.isArray(subject) || !Array.isArray(baseline) || subject.length !== baseline.length || !subject.length) throw Error('对比结果不完整');
+  const baselineById = new Map(baseline.map(result => [result.id, result]));
+  if (baselineById.size !== baseline.length || subject.some(result => !baselineById.has(result.id))) throw Error('对比结果案例不匹配');
+  const average = results => results.reduce((sum, result) => sum + result.score, 0) / results.length;
+  const hardPasses = results => results.filter(result => result.hard.passed).length;
+  const subjectAverage = average(subject);
+  const baselineAverage = average(baseline);
+  const subjectHardPasses = hardPasses(subject);
+  const baselineHardPasses = hardPasses(baseline);
+  return {
+    subjectAverage,
+    baselineAverage,
+    scoreDelta: subjectAverage - baselineAverage,
+    subjectHardPasses,
+    baselineHardPasses,
+    hardPassDelta: subjectHardPasses - baselineHardPasses,
+    observedUplift: subjectAverage > baselineAverage && subjectHardPasses >= baselineHardPasses
+  };
 }

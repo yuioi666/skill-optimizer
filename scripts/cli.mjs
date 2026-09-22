@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { loadJob, loadModelConfig, publicModelConfig, save, hash, checks, grade, eligible, validateSkill } from './core.mjs';
+import { loadJob, loadModelConfig, publicModelConfig, save, hash, checks, grade, eligible, validateSkill, compareResults } from './core.mjs';
 import { callRole, modelCall, objectSchema } from './adapter.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -44,6 +44,8 @@ async function run() {
   const modelConfig=adapter === 'configured' && modelsFile ? await loadModelConfig(modelsFile) : null;
   if(adapter === 'configured' && !modelConfig) throw Error('configured adapter 缺少 models.local.json');
   const config = {...job.config};
+  const comparisonMode = config.comparisonMode || (config.compareWithoutSkill === true ? 'all' : 'original-vs-candidate');
+  config.comparisonMode = comparisonMode;
   if (options.iterations) {
     const n = Number(options.iterations);
     if (!Number.isInteger(n) || n < 1 || n > 10) throw Error('iterations 必须为 1–10');
@@ -60,11 +62,15 @@ async function run() {
   const updateStatus=async(phase,detail='')=>save(path.join(runDir,'status.md'),`# 运行状态\n\n- 状态：运行中\n- 当前阶段：${phase}\n- 当前任务：${detail || '准备中'}\n- 更新时间：${new Date().toISOString()}\n\n## 模型角色\n\n${Object.entries(visibleModels).map(([role,value])=>`- ${role}：${value.type}${value.model ? ` / ${value.model}` : ''}`).join('\n')}\n`);
   await updateStatus('准备','配置和数据快照已保存');
   console.log(`运行目录：${runDir}\n模式：${adapter === 'mock' ? '模拟演示（不代表真实质量）' : `真实模型（${adapter}）`}`);
+  const compareWithoutSkill = comparisonMode === 'skill-vs-none' || comparisonMode === 'all';
+  const optimizeCandidate = comparisonMode === 'original-vs-candidate' || comparisonMode === 'all';
+  const noSkillDev = compareWithoutSkill ? await evaluate(job.sets.development,null,path.join(runDir,'no-skill-development'),config,modelConfig,updateStatus) : null;
+  const noSkillReg = compareWithoutSkill ? await evaluate(job.sets.regression,null,path.join(runDir,'no-skill-regression'),config,modelConfig,updateStatus) : null;
   const baselineDev = await evaluate(job.sets.development,job.skill,path.join(runDir,'baseline-development'),config,modelConfig,updateStatus);
   const baselineReg = await evaluate(job.sets.regression,job.skill,path.join(runDir,'baseline-regression'),config,modelConfig,updateStatus);
   let skill = job.skill, feedback = baselineDev, selected = null;
   const iterations = [];
-  for (let n=1;n<=config.maxIterations;n++) {
+  for (let n=1;optimizeCandidate && n<=config.maxIterations;n++) {
     console.log(`优化第 ${n} 轮`);
     const dir = path.join(runDir,`iteration-${n}`);
     await updateStatus(`第 ${n} 轮优化`,'optimizer');
@@ -80,21 +86,31 @@ async function run() {
     skill=candidate.skill;
     feedback=dev; // Regression contents and scores never enter the optimizer payload.
   }
-  let holdout = null, baselineHoldout = null, passed=false;
-  if (selected) {
+  let holdout = null, baselineHoldout = null, noSkillHoldout = null, passed=false;
+  if (comparisonMode === 'skill-vs-none') {
+    noSkillHoldout = await evaluate(job.sets.holdout,null,path.join(runDir,'no-skill-holdout'),config,modelConfig,updateStatus);
+    baselineHoldout = await evaluate(job.sets.holdout,job.skill,path.join(runDir,'baseline-holdout'),config,modelConfig,updateStatus);
+  } else if (selected) {
     // Candidate is frozen before either holdout execution. No retry on holdout failure.
+    noSkillHoldout = compareWithoutSkill ? await evaluate(job.sets.holdout,null,path.join(runDir,'no-skill-holdout'),config,modelConfig,updateStatus) : null;
     baselineHoldout = await evaluate(job.sets.holdout,job.skill,path.join(runDir,'baseline-holdout'),config,modelConfig,updateStatus);
     holdout = await evaluate(job.sets.holdout,selected,path.join(runDir,'selected-holdout'),config,modelConfig,updateStatus);
     passed=eligible(holdout,baselineHoldout,config.threshold);
   }
-  const status = passed ? 'passed' : selected ? 'holdout-failed' : 'no-qualified-candidate';
-  const report={id,adapter,status,threshold:config.threshold,baselineDev,baselineReg,iterations,baselineHoldout,holdout,finishedAt:new Date().toISOString()};
+  const status = comparisonMode === 'skill-vs-none' ? 'effectiveness-measured' : passed ? 'passed' : selected ? 'holdout-failed' : 'no-qualified-candidate';
+  const effectiveness = compareWithoutSkill ? {
+    development:compareResults(baselineDev,noSkillDev),
+    regression:compareResults(baselineReg,noSkillReg),
+    holdout:noSkillHoldout && baselineHoldout ? compareResults(baselineHoldout,noSkillHoldout) : null
+  } : null;
+  const report={id,adapter,status,comparisonMode,threshold:config.threshold,noSkillDev,noSkillReg,baselineDev,baselineReg,iterations,noSkillHoldout,baselineHoldout,holdout,effectiveness,finishedAt:new Date().toISOString()};
   await save(path.join(runDir,'report.json'),report);
   const rows=[];
-  for (const [label,results] of [['原版开发集',baselineDev],['原版回归集',baselineReg],...iterations.flatMap(i=>[[`第 ${i.iteration} 轮开发集`,i.dev],[`第 ${i.iteration} 轮回归集`,i.reg]]),['原版保留集',baselineHoldout],['候选保留集',holdout]]) {
+  for (const [label,results] of [['无 Skill 开发集',noSkillDev],['原版开发集',baselineDev],['无 Skill 回归集',noSkillReg],['原版回归集',baselineReg],...iterations.flatMap(i=>[[`第 ${i.iteration} 轮开发集`,i.dev],[`第 ${i.iteration} 轮回归集`,i.reg]]),['无 Skill 保留集',noSkillHoldout],['原版保留集',baselineHoldout],['候选保留集',holdout]]) {
     for (const r of results || []) rows.push(`| ${label} | ${r.id} | ${(r.score*100).toFixed(1)}% | ${r.hard.passed ? '通过' : r.hard.failures.join('；')} |`);
   }
-  const markdown=`# Skill 评估报告\n\n运行：${id}\n\n模式：${adapter === 'mock' ? '模拟演示，分数不可用于判断实际能力' : `真实模型执行与模型评审（${adapter}）`}\n\n结果：${status}\n\n| 阶段 | 案例 | 评分 | 确定性检查 |\n|---|---|---:|---|\n${rows.join('\n')}\n\n本报告是文本任务小样本验证，不代表技能自动触发、脚本执行或文件产物质量。模型评分存在波动。保留集结果不用于本轮优化；若根据该结果改进，需要更换新的保留集。\n`;
+  const effectivenessMarkdown = effectiveness ? `\n## 原版 Skill 相对无 Skill 的观测提升\n\n| 数据集 | 无 Skill 平均分 | 原版平均分 | 分数变化 | 硬性检查变化 | 观测到提升 |\n|---|---:|---:|---:|---:|---|\n${Object.entries(effectiveness).filter(([,value])=>value).map(([split,value])=>`| ${{development:'开发集',regression:'回归集',holdout:'保留集'}[split]} | ${(value.baselineAverage*100).toFixed(1)}% | ${(value.subjectAverage*100).toFixed(1)}% | ${(value.scoreDelta*100).toFixed(1)} 个百分点 | ${value.hardPassDelta >= 0 ? '+' : ''}${value.hardPassDelta} | ${value.observedUplift ? '是' : '否'} |`).join('\n')}\n` : '';
+  const markdown=`# Skill 评估报告\n\n运行：${id}\n\n模型模式：${adapter === 'mock' ? '模拟演示，分数不可用于判断实际能力' : `真实模型执行与模型评审（${adapter}）`}\n\n对比线路：${comparisonMode}\n\n结果：${status}\n${effectivenessMarkdown}\n| 阶段 | 案例 | 评分 | 确定性检查 |\n|---|---|---:|---|\n${rows.join('\n')}\n\n“观测到提升”表示原版平均分高于同模型无 Skill 基线，且硬性检查通过数未减少；它是当前案例中的证据，不代表所有场景。候选交付仍要求不低于原版。本文本任务小样本验证不代表技能自动触发、脚本执行或文件产物质量。模型评分存在波动。保留集结果不用于本轮优化；若根据该结果改进，需要更换新的保留集。\n`;
   await save(path.join(runDir,'report.md'),markdown);
   await save(path.join(runDir,'status.md'),`# 运行状态\n\n- 状态：已结束\n- 结果：${status}\n- 更新时间：${new Date().toISOString()}\n\n查看同目录的 report.md。\n`);
   if (passed) {
@@ -103,6 +119,8 @@ async function run() {
     await save(path.join(finalDir,'report.md'),markdown);
     await save(path.join(finalDir,'report.json'),report);
     console.log(`通过；候选版本：${finalDir}`);
+  } else if (comparisonMode === 'skill-vs-none') {
+    console.log('Skill 有效性对比完成；此线路不生成或发布候选版本。');
   } else { process.exitCode=2; console.log(`未达到门槛：${status}，未发布候选版本。`); }
   console.log(`报告：${path.join(runDir,'report.md')}`);
 }

@@ -7,6 +7,7 @@
     { "id": "clarity", "description": "结论和行动项清楚可读，无无关内容" }
   ],
   "threshold": 0.8,
+  "comparisonMode": "all",
   "maxIterations": 2,
   "timeoutMs": 180000,
   "skill": "original-skill/SKILL.md"

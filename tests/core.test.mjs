@@ -4,7 +4,7 @@ import { mkdtemp, cp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { checks, grade, eligible, loadJob, loadModelConfig, publicModelConfig } from '../scripts/core.mjs';
+import { checks, grade, eligible, loadJob, loadModelConfig, publicModelConfig, compareResults } from '../scripts/core.mjs';
 
 test('确定性失败不得被高分掩盖',()=>{
   const hard=checks('已启动广告投放',{includes:['待确认'],excludes:['已启动广告投放']});
@@ -15,6 +15,15 @@ test('逐案例阻止退步，拒绝缺失基线',()=>{
   assert.equal(eligible([],[],0.8),false);
   assert.equal(eligible([{id:'x',hard:{passed:true},score:0.85}],[{id:'x',score:0.9}],0.8),false);
   assert.equal(eligible([{id:'x',hard:{passed:true},score:1}],[],0.8),false);
+});
+test('无 Skill 对比报告分数和硬性检查变化',()=>{
+  const noSkill=[{id:'a',score:0.5,hard:{passed:true}},{id:'b',score:0.5,hard:{passed:false}}];
+  const original=[{id:'a',score:0.75,hard:{passed:true}},{id:'b',score:0.75,hard:{passed:true}}];
+  assert.deepEqual(compareResults(original,noSkill),{
+    subjectAverage:0.75,baselineAverage:0.5,scoreDelta:0.25,
+    subjectHardPasses:2,baselineHardPasses:1,hardPassDelta:1,observedUplift:true
+  });
+  assert.throws(()=>compareResults(original,[noSkill[0]]),/不完整/);
 });
 test('评审必须覆盖全部维度且给出有效评分证据',()=>{
   const rubric=[{id:'a'},{id:'b'}];
@@ -35,6 +44,39 @@ test('未知检查项被拒绝，避免拼写错误静默失效',async()=>{
   await writeFile(path.join(dir,'holdout.jsonl'),JSON.stringify({id:'new',input:'独立输入',checks:{include:['x']}}));
   await assert.rejects(loadJob(dir),/未知/);
 });
+test('无 Skill 对比开关只接受布尔值',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'skill-eval-'));
+  await cp('examples/meeting-summary',dir,{recursive:true});
+  const config=JSON.parse(await readFile(path.join(dir,'job.json'),'utf8'));
+  config.compareWithoutSkill='true';
+  await writeFile(path.join(dir,'job.json'),JSON.stringify(config));
+  await assert.rejects(loadJob(dir),/布尔值/);
+});
+test('对比线路只接受三个已定义值',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'skill-eval-'));
+  await cp('examples/meeting-summary',dir,{recursive:true});
+  const config=JSON.parse(await readFile(path.join(dir,'job.json'),'utf8'));
+  config.comparisonMode='unknown';
+  await writeFile(path.join(dir,'job.json'),JSON.stringify(config));
+  await assert.rejects(loadJob(dir),/comparisonMode/);
+});
+test('仅测 Skill 有效性时不调用优化器或生成候选',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'skill-effectiveness-'));
+  await cp('examples/meeting-summary',dir,{recursive:true});
+  const config=JSON.parse(await readFile(path.join(dir,'job.json'),'utf8'));
+  config.comparisonMode='skill-vs-none';
+  await writeFile(path.join(dir,'job.json'),JSON.stringify(config));
+  const result=spawnSync(process.execPath,['scripts/cli.mjs','run','--adapter','mock','--job',dir],{encoding:'utf8',timeout:30000});
+  assert.equal(result.status,0,result.stderr);
+  const runDir=result.stdout.match(/运行目录：([^\r\n]+)/)[1];
+  const report=JSON.parse(await readFile(path.join(runDir,'report.json'),'utf8'));
+  assert.equal(report.status,'effectiveness-measured');
+  assert.equal(report.comparisonMode,'skill-vs-none');
+  assert.equal(report.iterations.length,0);
+  assert.equal(report.noSkillHoldout.length,1);
+  assert.equal(report.baselineHoldout.length,1);
+  assert.equal(report.holdout,null);
+});
 test('模拟流程端到端运行，保留集不进入优化器提示',async()=>{
   const result=spawnSync(process.execPath,['scripts/cli.mjs','run','--adapter','mock'],{encoding:'utf8',timeout:30000});
   assert.equal(result.status,0,result.stderr);
@@ -43,6 +85,8 @@ test('模拟流程端到端运行，保留集不进入优化器提示',async()=>
   const report=JSON.parse(await readFile(path.join(runDir,'report.json'),'utf8'));
   assert.equal(report.status,'passed');
   assert.equal(report.adapter,'mock');
+  assert.equal(report.noSkillDev.length,2);
+  assert.equal(report.effectiveness.development.observedUplift,true);
   assert.equal(report.holdout.length,1);
   const prompt=await readFile(path.join(runDir,'iteration-1','optimizer','prompt.txt'),'utf8');
   const job=await loadJob('examples/meeting-summary');
