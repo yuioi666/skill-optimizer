@@ -3,7 +3,6 @@ final/
 node_modules/
 .env
 *.log
-.validation-deps/
 inputs/*
 !inputs/README.md
 config/models.local.json
