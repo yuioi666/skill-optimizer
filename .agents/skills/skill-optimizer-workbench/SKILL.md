@@ -13,7 +13,7 @@ description: 在 Codex 桌面工作区中，根据用户需求创建测试集，
 2. 并行委派 `requirements_analyst` 和 `test_designer`，让它们返回独立结论。用户可在桌面端打开各线程查看。
 3. 主 Agent 合并结论，在 `inputs/<任务名>/` 创建或更新任务配置。保留用户明确要求，不将单个案例答案写入 Skill。
 4. 读取 `config/models.local.json`。缺失时复制 `config/models.example.json`，并只在确实需要第三方凭据时请用户填写。API Key 不得出现在对话、提示、日志或 Git 中。
-5. 在产生模型调用前确认用户要运行的对比线路。若用户尚未指定，必须询问一次，并说明按当前案例数估算的最大调用量：`skill-vs-none`（无 Skill 与原版，只验证有效性）、`original-vs-candidate`（原版与候选，只优化并防退步）或 `all`（三者全部比较）。把选择写入 `job.json` 的 `comparisonMode`。默认只优化一轮；增加轮数或产生额外付费调用前说明预计调用量。
+5. 在产生模型调用前确认用户要运行的对比线路和采样强度。若用户尚未指定，必须询问一次，并说明按当前案例数估算的基础调用量与重试上限：`skill-vs-none`（无 Skill 与原版，只验证有效性）、`original-vs-candidate`（原版与候选，只优化并防退步）或 `all`（三者全部比较）；`samplesPerCase: 1` 为省调用，`3` 为更稳健的中位数评估。把选择写入 `job.json`。默认只优化一轮；增加轮数或产生额外付费调用前说明预计调用量。
 6. 委派 `evaluation_operator` 运行配置校验和所选线路。`skill-vs-none` 不得调用优化器或生成候选版本。
 7. 委派 `result_auditor` 独立复核运行证据。只有包含候选的线路且开发集、回归集和保留集均通过时，才交付 `final/` 中的候选版本。
 8. 在主对话中提供各 Agent 的状态、关键发现，以及报告和候选 Skill 的可点击路径。

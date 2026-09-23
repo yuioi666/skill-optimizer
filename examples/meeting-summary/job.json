@@ -13,6 +13,8 @@
   "threshold": 0.8,
   "scoreTolerance": 0.05,
   "minComparisonCases": 6,
+  "samplesPerCase": 1,
+  "maxAttemptsPerCall": 2,
   "comparisonMode": "all",
   "maxIterations": 2,
   "timeoutMs": 180000,

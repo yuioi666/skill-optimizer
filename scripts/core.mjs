@@ -25,6 +25,8 @@ export async function loadJob(dir) {
   if (!(config.threshold > 0 && config.threshold <= 1) || !Number.isInteger(config.maxIterations) || config.maxIterations < 1 || config.maxIterations > 10 || !Number.isInteger(config.timeoutMs) || config.timeoutMs < 1000) throw Error('阈值、迭代次数或超时无效');
   if (config.scoreTolerance !== undefined && (typeof config.scoreTolerance !== 'number' || !Number.isFinite(config.scoreTolerance) || config.scoreTolerance < 0 || config.scoreTolerance > 0.25)) throw Error('scoreTolerance 必须为 0–0.25');
   if (config.minComparisonCases !== undefined && (!Number.isInteger(config.minComparisonCases) || config.minComparisonCases < 2)) throw Error('minComparisonCases 必须为不小于 2 的整数');
+  if (config.samplesPerCase !== undefined && (!Number.isInteger(config.samplesPerCase) || config.samplesPerCase < 1 || config.samplesPerCase > 5)) throw Error('samplesPerCase 必须为 1–5 的整数');
+  if (config.maxAttemptsPerCall !== undefined && (!Number.isInteger(config.maxAttemptsPerCall) || config.maxAttemptsPerCall < 1 || config.maxAttemptsPerCall > 3)) throw Error('maxAttemptsPerCall 必须为 1–3 的整数');
   if (config.comparisonMode !== undefined && !['skill-vs-none','original-vs-candidate','all'].includes(config.comparisonMode)) throw Error('comparisonMode 必须为 skill-vs-none、original-vs-candidate 或 all');
   if (config.compareWithoutSkill !== undefined && typeof config.compareWithoutSkill !== 'boolean') throw Error('compareWithoutSkill 必须为布尔值');
   if (typeof config.skill !== 'string' || path.isAbsolute(config.skill) || config.skill.split(/[\\/]/).includes('..')) throw Error('Skill 路径必须位于任务目录');
@@ -93,6 +95,12 @@ export function grade(value, rubric) {
   }
   return value.scores.reduce((a, b) => a + b.score, 0) / (4 * rubric.length);
 }
+export function median(values) {
+  if(!Array.isArray(values) || !values.length || values.some(value=>!Number.isFinite(value))) throw Error('中位数输入无效');
+  const sorted=[...values].sort((a,b)=>a-b);
+  const middle=Math.floor(sorted.length/2);
+  return sorted.length%2 ? sorted[middle] : (sorted[middle-1]+sorted[middle])/2;
+}
 const averageScore = (results,key='score') => results.reduce((sum,result)=>sum+result[key],0)/results.length;
 
 export function eligible(candidate, baseline, threshold, tolerance=0) {
@@ -114,26 +122,31 @@ export function compareResults(subject, baseline, {tolerance=0.05,minCases=6}={}
   if (!Array.isArray(subject) || !Array.isArray(baseline) || subject.length !== baseline.length || !subject.length) throw Error('对比结果不完整');
   const baselineById = new Map(baseline.map(result => [result.id, result]));
   if (baselineById.size !== baseline.length || subject.some(result => !baselineById.has(result.id))) throw Error('对比结果案例不匹配');
-  if(subject.some(result=>!Number.isFinite(result.score)) || baseline.some(result=>!Number.isFinite(result.score))) throw Error('对比结果缺少有效评分');
-  const average = results => results.reduce((sum, result) => sum + result.score, 0) / results.length;
+  const validPairs=subject.map(result=>[result,baselineById.get(result.id)]).filter(pair=>pair.every(result=>Number.isFinite(result.score)));
+  const average = results => results.length ? results.reduce((sum, result) => sum + result.score, 0) / results.length : null;
   const hardPasses = results => results.filter(result => (result.taskHard || result.hard).passed).length;
-  const subjectAverage = average(subject);
-  const baselineAverage = average(baseline);
+  const validSubject=validPairs.map(pair=>pair[0]);
+  const validBaseline=validPairs.map(pair=>pair[1]);
+  const subjectAverage = average(validSubject);
+  const baselineAverage = average(validBaseline);
   const subjectHardPasses = hardPasses(subject);
   const baselineHardPasses = hardPasses(baseline);
   let conclusion='inconclusive';
-  if(subject.length < minCases) conclusion='insufficient-sample';
+  if(validPairs.length !== subject.length) conclusion='missing-evidence';
+  else if(subject.length < minCases) conclusion='insufficient-sample';
   else if(subjectHardPasses < baselineHardPasses || subjectAverage < baselineAverage-tolerance) conclusion='regressed';
   else if(subjectHardPasses >= baselineHardPasses && subjectAverage > baselineAverage+tolerance) conclusion='improved';
   return {
     subjectAverage,
     baselineAverage,
-    scoreDelta: subjectAverage - baselineAverage,
+    scoreDelta: subjectAverage === null || baselineAverage === null ? null : subjectAverage - baselineAverage,
     subjectHardPasses,
     baselineHardPasses,
     hardPassDelta: subjectHardPasses - baselineHardPasses,
     tolerance,
-    sampleSize:subject.length,
+    sampleSize:validPairs.length,
+    totalPairs:subject.length,
+    missingPairs:subject.length-validPairs.length,
     conclusion,
     observedUplift: conclusion === 'improved'
   };

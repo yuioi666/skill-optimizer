@@ -120,6 +120,7 @@ npm run optimize -- --job inputs/my-skill --iterations 1
 - `smoke` 会使用 `runner` 的配置实际调用一次模型。
 - `runs/<运行编号>/status.md` 是当前阶段面板。
 - `runs/<运行编号>/report.md` 是完整评估报告。
+- `runs/<运行编号>/manifest.json` 记录模型、Skill、数据集和三类角色提示词的哈希，便于确认不同运行是否使用同一评测口径。
 - `final/<运行编号>/candidate-skill/SKILL.md` 是通过验收的候选版本。
 - 原始 Skill 永不覆盖。
 
@@ -135,7 +136,9 @@ npm run optimize -- --job inputs/my-skill --iterations 1
 
 无 Skill 对比只使用公共任务需求、公共评分维度和输入可推导的硬检查。`skillRequirements`、`skillRubric` 和案例中的 `skillChecks` 单独衡量 Skill 合规性，不参与无 Skill uplift，避免用只有 Skill 才规定的措辞压低无 Skill 得分。软分按数据集聚合，并通过 `scoreTolerance` 容忍轻微评分波动；案例数低于 `minComparisonCases` 时报告“样本不足”。
 
-以 5 个开发案例、4 个回归案例和 4 个保留案例为例，单轮全部通过时三个线路的最大调用量依次约为 52、53 和 79 次。候选提前被拒绝时不会继续消耗保留集调用。
+`samplesPerCase` 可设为 1–5。每案例运行多次后使用中位数评分，并在报告中标出波动；省调用时使用 1，正式评估建议使用 3。`maxAttemptsPerCall` 可设为 1–3，模型调用或结构化结果异常时有限重试，重试耗尽会记录为证据缺失并阻止候选交付。
+
+以 5 个开发案例、4 个回归案例和 4 个保留案例为例，每案例采样 1 次且单轮全部通过时，三个线路的基础调用量依次约为 52、53 和 79 次；采样 3 次时约为 156、157 和 235 次。若 `maxAttemptsPerCall` 为 2，只有调用异常时才会重试，理论上限为基础调用量的两倍。候选提前被拒绝时不会继续消耗保留集调用。
 
 旧任务中的 `compareWithoutSkill: true` 仍兼容，会按 `all` 运行；新任务应使用 `comparisonMode`。
 

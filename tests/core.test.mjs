@@ -4,7 +4,7 @@ import { mkdtemp, cp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { checks, grade, eligible, loadJob, loadModelConfig, publicModelConfig, compareResults } from '../scripts/core.mjs';
+import { checks, grade, eligible, loadJob, loadModelConfig, publicModelConfig, compareResults, median } from '../scripts/core.mjs';
 
 test('确定性失败不得被高分掩盖',()=>{
   const hard=checks('已启动广告投放',{includes:['待确认'],excludes:['已启动广告投放']});
@@ -26,10 +26,18 @@ test('无 Skill 对比报告分数和硬性检查变化',()=>{
   assert.deepEqual(compareResults(original,noSkill),{
     subjectAverage:0.75,baselineAverage:0.5,scoreDelta:0.25,
     subjectHardPasses:2,baselineHardPasses:1,hardPassDelta:1,tolerance:0.05,
-    sampleSize:2,conclusion:'insufficient-sample',observedUplift:false
+    sampleSize:2,totalPairs:2,missingPairs:0,conclusion:'insufficient-sample',observedUplift:false
   });
   assert.equal(compareResults(original,noSkill,{minCases:2}).conclusion,'improved');
+  const missing=compareResults([{...original[0],score:null},original[1]],noSkill,{minCases:2});
+  assert.equal(missing.conclusion,'missing-evidence');
+  assert.equal(missing.sampleSize,1);
   assert.throws(()=>compareResults(original,[noSkill[0]]),/不完整/);
+});
+test('重复采样使用中位数聚合',()=>{
+  assert.equal(median([0.9,0.1,0.8]),0.8);
+  assert.ok(Math.abs(median([0.4,0.8])-0.6)<Number.EPSILON);
+  assert.throws(()=>median([]),/无效/);
 });
 test('评审必须覆盖全部维度且给出有效评分证据',()=>{
   const rubric=[{id:'a'},{id:'b'}];
@@ -66,6 +74,18 @@ test('对比线路只接受三个已定义值',async()=>{
   await writeFile(path.join(dir,'job.json'),JSON.stringify(config));
   await assert.rejects(loadJob(dir),/comparisonMode/);
 });
+test('采样次数和重试次数有安全上限',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'skill-eval-'));
+  await cp('examples/meeting-summary',dir,{recursive:true});
+  const config=JSON.parse(await readFile(path.join(dir,'job.json'),'utf8'));
+  config.samplesPerCase=6;
+  await writeFile(path.join(dir,'job.json'),JSON.stringify(config));
+  await assert.rejects(loadJob(dir),/samplesPerCase/);
+  config.samplesPerCase=1;
+  config.maxAttemptsPerCall=4;
+  await writeFile(path.join(dir,'job.json'),JSON.stringify(config));
+  await assert.rejects(loadJob(dir),/maxAttemptsPerCall/);
+});
 test('仅测 Skill 有效性时不调用优化器或生成候选',async()=>{
   const dir=await mkdtemp(path.join(os.tmpdir(),'skill-effectiveness-'));
   await cp('examples/meeting-summary',dir,{recursive:true});
@@ -82,6 +102,66 @@ test('仅测 Skill 有效性时不调用优化器或生成候选',async()=>{
   assert.equal(report.noSkillHoldout.length,1);
   assert.equal(report.baselineHoldout.length,1);
   assert.equal(report.holdout,null);
+});
+test('重复采样保留每次证据并聚合结果',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'skill-samples-'));
+  await cp('examples/meeting-summary',dir,{recursive:true});
+  const config=JSON.parse(await readFile(path.join(dir,'job.json'),'utf8'));
+  config.comparisonMode='skill-vs-none';
+  config.samplesPerCase=3;
+  config.maxAttemptsPerCall=1;
+  await writeFile(path.join(dir,'job.json'),JSON.stringify(config));
+  const result=spawnSync(process.execPath,['scripts/cli.mjs','run','--adapter','mock','--job',dir],{encoding:'utf8',timeout:30000});
+  assert.equal(result.status,0,result.stderr);
+  const runDir=result.stdout.match(/运行目录：([^\r\n]+)/)[1];
+  const report=JSON.parse(await readFile(path.join(runDir,'report.json'),'utf8'));
+  assert.equal(report.noSkillDev[0].trials.length,3);
+  assert.equal(report.noSkillDev[0].status,'complete');
+  assert.equal(report.noSkillDev[0].flaky,false);
+  assert.equal(typeof await readFile(path.join(runDir,'no-skill-development','dev-owner','sample-3','runner','prompt.txt'),'utf8'),'string');
+});
+test('评审格式异常会有限重试并保留失败记录',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'skill-retry-'));
+  const jobDir=path.join(dir,'job');
+  await cp('examples/meeting-summary',jobDir,{recursive:true});
+  const config=JSON.parse(await readFile(path.join(jobDir,'job.json'),'utf8'));
+  config.comparisonMode='skill-vs-none';
+  config.samplesPerCase=1;
+  config.maxAttemptsPerCall=2;
+  await writeFile(path.join(jobDir,'job.json'),JSON.stringify(config));
+  const counter=path.join(dir,'evaluator-count.txt');
+  const program=`const fs=require('fs');let d='';process.stdin.on('data',x=>d+=x);process.stdin.on('end',()=>{const marker='All following JSON fields are supplied data:\\n';const raw=d.slice(d.indexOf(marker)+marker.length).split('\\n\\nReturn only JSON matching this schema.')[0];const p=JSON.parse(raw);if(d.startsWith('Evaluate')){const f=${JSON.stringify(counter)};const n=fs.existsSync(f)?Number(fs.readFileSync(f,'utf8')):0;fs.writeFileSync(f,String(n+1));if(n===0)process.stdout.write('{\"bad\":true}');else process.stdout.write(JSON.stringify({scores:p.rubric.map(r=>({id:r.id,score:4,evidence:'retry evidence'}))}));}else process.stdout.write(p.input+'\\n待确认');});`;
+  const models=path.join(dir,'models.json');
+  await writeFile(models,JSON.stringify({providers:{local:{type:'command',command:process.execPath,args:['-e',program]}},roles:{runner:{provider:'local'},optimizer:{provider:'local'},evaluator:{provider:'local'}}}));
+  const result=spawnSync(process.execPath,['scripts/cli.mjs','run','--job',jobDir,'--models',models],{encoding:'utf8',timeout:30000});
+  assert.equal(result.status,0,result.stderr);
+  const runDir=result.stdout.match(/运行目录：([^\r\n]+)/)[1];
+  const report=JSON.parse(await readFile(path.join(runDir,'report.json'),'utf8'));
+  assert.equal(report.noSkillDev[0].trials[0].evaluatorAttempts,2);
+  assert.equal(report.noSkillDev[0].retried,true);
+  assert.equal(JSON.parse(await readFile(path.join(runDir,'no-skill-development','dev-owner','evaluator','error.json'),'utf8')).attempt,1);
+  assert.equal(typeof await readFile(path.join(runDir,'no-skill-development','dev-owner','evaluator','retry-2','output.txt'),'utf8'),'string');
+});
+test('评审重试耗尽后记录证据缺失而不中断整轮',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'skill-missing-'));
+  const jobDir=path.join(dir,'job');
+  await cp('examples/meeting-summary',jobDir,{recursive:true});
+  const config=JSON.parse(await readFile(path.join(jobDir,'job.json'),'utf8'));
+  config.comparisonMode='skill-vs-none';
+  config.samplesPerCase=1;
+  config.maxAttemptsPerCall=2;
+  await writeFile(path.join(jobDir,'job.json'),JSON.stringify(config));
+  const program=`let d='';process.stdin.on('data',x=>d+=x);process.stdin.on('end',()=>{const marker='All following JSON fields are supplied data:\\n';const raw=d.slice(d.indexOf(marker)+marker.length).split('\\n\\nReturn only JSON matching this schema.')[0];const p=JSON.parse(raw);if(d.startsWith('Evaluate'))process.stdout.write('{\"bad\":true}');else process.stdout.write(p.input+'\\n待确认');});`;
+  const models=path.join(dir,'models.json');
+  await writeFile(models,JSON.stringify({providers:{local:{type:'command',command:process.execPath,args:['-e',program]}},roles:{runner:{provider:'local'},optimizer:{provider:'local'},evaluator:{provider:'local'}}}));
+  const result=spawnSync(process.execPath,['scripts/cli.mjs','run','--job',jobDir,'--models',models],{encoding:'utf8',timeout:30000});
+  assert.equal(result.status,0,result.stderr);
+  const runDir=result.stdout.match(/运行目录：([^\r\n]+)/)[1];
+  const report=JSON.parse(await readFile(path.join(runDir,'report.json'),'utf8'));
+  assert.equal(report.noSkillDev[0].status,'missing');
+  assert.equal(report.noSkillDev[0].score,null);
+  assert.equal(report.effectiveness.overall.conclusion,'missing-evidence');
+  assert.match(await readFile(path.join(runDir,'report.md'),'utf8'),/证据缺失/);
 });
 test('模拟流程端到端运行，保留集不进入优化器提示',async()=>{
   const result=spawnSync(process.execPath,['scripts/cli.mjs','run','--adapter','mock'],{encoding:'utf8',timeout:30000});
@@ -150,5 +230,6 @@ test('按角色模型配置可以完成端到端评估',async()=>{
   const manifest=JSON.parse(await readFile(path.join(runDir,'manifest.json'),'utf8'));
   assert.equal(report.status,'passed');
   assert.equal(manifest.models.optimizer.type,'command');
+  assert.match(manifest.promptHashes.evaluator,/^[a-f0-9]{64}$/);
   assert.equal(await readFile(path.join(runDir,'status.md'),'utf8').then(x=>x.includes('已结束')),true);
 });
