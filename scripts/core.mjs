@@ -42,9 +42,13 @@ export async function loadJob(dir) {
       if (ids.has(c.id) || inputs.has(c.input.trim())) throw Error('案例 ID 或输入重复，可能发生测试集泄漏');
       ids.add(c.id); inputs.add(c.input.trim());
       for(const rules of [c.checks,c.skillChecks].filter(Boolean)) {
-        if (Object.keys(rules).some(k => !['includes','excludes','maxChars'].includes(k))) throw Error('未知确定性检查');
-        for (const k of ['includes','excludes']) if (rules[k] !== undefined && (!Array.isArray(rules[k]) || rules[k].some(v => typeof v !== 'string' || !v))) throw Error('检查词必须为非空字符串');
+        if (Object.keys(rules).some(k => !['includes','containsAny','excludes','matches','notMatches','jsonEquals','minChars','maxChars'].includes(k))) throw Error('未知确定性检查');
+        for (const k of ['includes','containsAny','excludes','matches','notMatches']) if (rules[k] !== undefined && (!Array.isArray(rules[k]) || !rules[k].length || rules[k].some(v => typeof v !== 'string' || !v))) throw Error('检查词或正则必须为非空字符串数组');
+        for(const k of ['matches','notMatches']) for(const pattern of rules[k] || []) { try { new RegExp(pattern,'u'); } catch { throw Error(`无效正则：${pattern}`); } }
+        if(rules.jsonEquals !== undefined && (!Array.isArray(rules.jsonEquals) || !rules.jsonEquals.length || rules.jsonEquals.some(item=>!item || typeof item.path !== 'string' || !item.path.startsWith('/') || !Object.hasOwn(item,'value')))) throw Error('jsonEquals 必须包含 JSON Pointer 路径和值');
+        if (rules.minChars !== undefined && (!Number.isInteger(rules.minChars) || rules.minChars < 0)) throw Error('minChars 无效');
         if (rules.maxChars !== undefined && (!Number.isInteger(rules.maxChars) || rules.maxChars < 1)) throw Error('maxChars 无效');
+        if(rules.minChars !== undefined && rules.maxChars !== undefined && rules.minChars > rules.maxChars) throw Error('minChars 不得大于 maxChars');
       }
     }
   }
@@ -83,8 +87,21 @@ export function checks(output, rules) {
   const failures = [];
   if (!output.trim()) failures.push('输出为空');
   for (const s of rules.includes ?? []) if (!output.includes(s)) failures.push(`缺少：${s}`);
+  if (rules.containsAny?.length && !rules.containsAny.some(s=>output.includes(s))) failures.push(`至少包含一个：${rules.containsAny.join(' / ')}`);
   for (const s of rules.excludes ?? []) if (output.includes(s)) failures.push(`包含禁用内容：${s}`);
+  for (const pattern of rules.matches ?? []) if (!new RegExp(pattern,'u').test(output)) failures.push(`未匹配正则：${pattern}`);
+  for (const pattern of rules.notMatches ?? []) if (new RegExp(pattern,'u').test(output)) failures.push(`匹配禁用正则：${pattern}`);
+  if (rules.minChars !== undefined && [...output].length < rules.minChars) failures.push('低于长度下限');
   if (rules.maxChars && [...output].length > rules.maxChars) failures.push('超出长度限制');
+  if(rules.jsonEquals?.length) {
+    let value;
+    try { value=JSON.parse(output); }
+    catch { failures.push('输出不是有效 JSON'); }
+    if(value !== undefined) for(const expected of rules.jsonEquals) {
+      const actual=expected.path.split('/').slice(1).map(part=>part.replaceAll('~1','/').replaceAll('~0','~')).reduce((current,key)=>current?.[key],value);
+      if(JSON.stringify(actual) !== JSON.stringify(expected.value)) failures.push(`JSON 字段不匹配：${expected.path}`);
+    }
+  }
   return { passed: failures.length === 0, failures };
 }
 export function grade(value, rubric) {

@@ -22,17 +22,20 @@ let runDir;
 
 async function callRoleWithRetries(args,validate=()=>{},maxAttempts=1) {
   let lastError;
+  const startedAt=Date.now();
   for(let attempt=1;attempt<=maxAttempts;attempt++) {
     const attemptDir=attempt === 1 ? args.dir : path.join(args.dir,`retry-${attempt}`);
     try {
       const value=await callRole({...args,dir:attemptDir});
       validate(value);
-      return {value,attempts:attempt};
+      return {value,attempts:attempt,elapsedMs:Date.now()-startedAt};
     } catch(error) {
       lastError=error;
       await save(path.join(attemptDir,'error.json'),{message:error.message,attempt,at:new Date().toISOString()});
     }
   }
+  lastError.attempts=maxAttempts;
+  lastError.elapsedMs=Date.now()-startedAt;
   throw lastError;
 }
 
@@ -54,7 +57,7 @@ async function evaluate(cases, skill, dir, config, modelConfig, onProgress=async
       try {
         runner=await callRoleWithRetries({ ...common, role:'runner', payload:{skill,input:c.input}, dir:path.join(sampleDir,'runner') },value=>{if(typeof value !== 'string' || !value.trim()) throw Error('runner 输出为空');},maxAttempts);
       } catch(error) {
-        trials.push({sample,status:'missing',missingStage:'runner',error:error.message});
+        trials.push({sample,status:'missing',missingStage:'runner',error:error.message,runnerAttempts:error.attempts || maxAttempts,runnerElapsedMs:error.elapsedMs || null});
         continue;
       }
       const output=runner.value;
@@ -65,12 +68,12 @@ async function evaluate(cases, skill, dir, config, modelConfig, onProgress=async
       try {
         evaluator=await callRoleWithRetries({ ...common, role:'evaluator', payload:{input:c.input,output,requirements:evaluationRequirements,rubric:evaluationRubric}, dir:path.join(sampleDir,'evaluator') },value=>grade(value,evaluationRubric),maxAttempts);
       } catch(error) {
-        trials.push({sample,status:'missing',missingStage:'evaluator',error:error.message,output,runnerAttempts:runner.attempts,hard,taskHard,skillHard});
+        trials.push({sample,status:'missing',missingStage:'evaluator',error:error.message,output,runnerAttempts:runner.attempts,evaluatorAttempts:error.attempts || maxAttempts,runnerElapsedMs:runner.elapsedMs,evaluatorElapsedMs:error.elapsedMs || null,hard,taskHard,skillHard});
         continue;
       }
       const judgment=evaluator.value;
       const scoresFor=rubric=>({scores:judgment.scores.filter(score=>rubric.some(item=>item.id===score.id))});
-      trials.push({sample,status:'complete',output,runnerAttempts:runner.attempts,evaluatorAttempts:evaluator.attempts,hard,taskHard,skillHard,score:grade(scoresFor(config.rubric),config.rubric),skillScore:skillRubric.length ? grade(scoresFor(skillRubric),skillRubric) : null,judgment});
+      trials.push({sample,status:'complete',output,runnerAttempts:runner.attempts,evaluatorAttempts:evaluator.attempts,runnerElapsedMs:runner.elapsedMs,evaluatorElapsedMs:evaluator.elapsedMs,hard,taskHard,skillHard,score:grade(scoresFor(config.rubric),config.rubric),skillScore:skillRubric.length ? grade(scoresFor(skillRubric),skillRubric) : null,judgment});
     }
     const valid=trials.filter(trial=>trial.status === 'complete');
     const failures=[...new Set([...valid.flatMap(trial=>trial.hard.failures),...(valid.length === samples ? [] : ['评测证据缺失'])])];
@@ -88,6 +91,7 @@ async function evaluate(cases, skill, dir, config, modelConfig, onProgress=async
 }
 
 async function run() {
+  const runStartedAt=Date.now();
   if (adapter !== 'mock' && !options.job) {
     throw Error(`真实优化必须指定任务目录，例如：node scripts/cli.mjs run --job inputs/my-skill --adapter ${adapter} --iterations 1`);
   }
@@ -135,7 +139,7 @@ async function run() {
         validateSkill(candidate.skill);
       },config.maxAttemptsPerCall ?? 1);
     } catch(error) {
-      iterations.push({iteration:n,accepted:false,status:'missing',error:error.message});
+      iterations.push({iteration:n,accepted:false,status:'missing',error:error.message,optimizerAttempts:error.attempts || (config.maxAttemptsPerCall ?? 1),optimizerElapsedMs:error.elapsedMs || null});
       break;
     }
     const candidate=optimized.value;
@@ -144,7 +148,7 @@ async function run() {
     const reg = await evaluate(job.sets.regression,candidate.skill,path.join(dir,'regression'),config,modelConfig,updateStatus);
     const tolerance=config.scoreTolerance ?? 0.05;
     const accepted = eligible(dev,baselineDev,config.threshold,tolerance) && eligible(reg,baselineReg,config.threshold,tolerance);
-    iterations.push({iteration:n,rationale:candidate.rationale,dev,reg,accepted,status:'complete',optimizerAttempts:optimized.attempts,skillHash:hash(candidate.skill)});
+    iterations.push({iteration:n,rationale:candidate.rationale,dev,reg,accepted,status:'complete',optimizerAttempts:optimized.attempts,optimizerElapsedMs:optimized.elapsedMs,skillHash:hash(candidate.skill)});
     if (accepted) { selected=candidate.skill; break; }
     feedback=dev; // Regression contents and scores never enter the optimizer payload.
   }
@@ -169,7 +173,14 @@ async function run() {
     regression:compareResults(baselineReg,noSkillReg,comparisonOptions),
     holdout:noSkillHoldout && baselineHoldout ? compareResults(baselineHoldout,noSkillHoldout,comparisonOptions) : null
   } : null;
-  const report={id,adapter,status,comparisonMode,threshold:config.threshold,noSkillDev,noSkillReg,baselineDev,baselineReg,iterations,noSkillHoldout,baselineHoldout,holdout,effectiveness,finishedAt:new Date().toISOString()};
+  const resultGroups=[noSkillDev,noSkillReg,baselineDev,baselineReg,...iterations.flatMap(iteration=>[iteration.dev,iteration.reg]),noSkillHoldout,baselineHoldout,holdout].filter(Array.isArray);
+  const allTrials=resultGroups.flatMap(results=>results.flatMap(result=>result.trials || []));
+  const usage={runnerCalls:allTrials.reduce((sum,trial)=>sum+(trial.runnerAttempts || 0),0),evaluatorCalls:allTrials.reduce((sum,trial)=>sum+(trial.evaluatorAttempts || 0),0),optimizerCalls:iterations.reduce((sum,iteration)=>sum+(iteration.optimizerAttempts || 0),0)};
+  usage.totalModelCalls=usage.runnerCalls+usage.evaluatorCalls+usage.optimizerCalls;
+  usage.roleElapsedMs={runner:allTrials.reduce((sum,trial)=>sum+(trial.runnerElapsedMs || 0),0),evaluator:allTrials.reduce((sum,trial)=>sum+(trial.evaluatorElapsedMs || 0),0),optimizer:iterations.reduce((sum,iteration)=>sum+(iteration.optimizerElapsedMs || 0),0)};
+  usage.wallTimeMs=Date.now()-runStartedAt;
+  usage.skillChars={original:[...job.skill].length,candidate:selected ? [...selected].length : null};
+  const report={id,adapter,status,comparisonMode,threshold:config.threshold,noSkillDev,noSkillReg,baselineDev,baselineReg,iterations,noSkillHoldout,baselineHoldout,holdout,effectiveness,usage,finishedAt:new Date().toISOString()};
   await save(path.join(runDir,'report.json'),report);
   const rows=[];
   for (const [label,results] of [['无 Skill 开发集',noSkillDev],['原版开发集',baselineDev],['无 Skill 回归集',noSkillReg],['原版回归集',baselineReg],...iterations.flatMap(i=>[[`第 ${i.iteration} 轮开发集`,i.dev],[`第 ${i.iteration} 轮回归集`,i.reg]]),['无 Skill 保留集',noSkillHoldout],['原版保留集',baselineHoldout],['候选保留集',holdout]]) {
@@ -178,7 +189,8 @@ async function run() {
   const conclusionLabel={improved:'提升',regressed:'退步',inconclusive:'差异不明确','insufficient-sample':'样本不足','missing-evidence':'证据缺失'};
   const percent=value=>Number.isFinite(value)?`${(value*100).toFixed(1)}%`:'—';
   const effectivenessMarkdown = effectiveness ? `\n## 原版 Skill 相对无 Skill 的观测结果\n\n| 数据集 | 有效配对/总数 | 无 Skill 平均分 | 原版平均分 | 分数变化 | 公共硬检查变化 | 结论 |\n|---|---:|---:|---:|---:|---:|---|\n${Object.entries(effectiveness).filter(([,value])=>value).map(([split,value])=>`| ${{overall:'总体',development:'开发集',regression:'回归集',holdout:'保留集'}[split]} | ${value.sampleSize}/${value.totalPairs} | ${percent(value.baselineAverage)} | ${percent(value.subjectAverage)} | ${Number.isFinite(value.scoreDelta) ? `${(value.scoreDelta*100).toFixed(1)} 个百分点` : '—'} | ${value.hardPassDelta >= 0 ? '+' : ''}${value.hardPassDelta} | ${conclusionLabel[value.conclusion]} |`).join('\n')}\n` : '';
-  const markdown=`# Skill 评估报告\n\n运行：${id}\n\n模型模式：${adapter === 'mock' ? '模拟演示，分数不可用于判断实际能力' : `真实模型执行与模型评审（${adapter}）`}\n\n对比线路：${comparisonMode}\n\n结果：${status}\n${effectivenessMarkdown}\n| 阶段 | 案例 | 公共任务评分 | Skill 合规评分 | 稳定性 | 确定性检查 |\n|---|---|---:|---:|---|---|\n${rows.join('\n')}\n\n每案例采样 ${config.samplesPerCase ?? 1} 次并使用中位数聚合；模型调用失败最多尝试 ${config.maxAttemptsPerCall ?? 1} 次。证据缺失不会被记作 0 分，但会阻止候选通过。无 Skill 对比只使用公共任务评分和公共硬检查，Skill 特有约定单独报告。候选软分按数据集聚合后使用 ${(config.scoreTolerance ?? 0.05)*100} 个百分点容忍带，硬检查仍是一票否决。“样本不足”表示当前案例数不足以支持方向性结论。候选交付仍要求整体不低于原版。本文本任务小样本验证不代表技能自动触发、脚本执行或文件产物质量。保留集结果不用于本轮优化；若根据该结果改进，需要更换新的保留集。\n`;
+  const usageMarkdown=`\n## 调用与体积\n\n- runner 调用：${usage.runnerCalls}\n- evaluator 调用：${usage.evaluatorCalls}\n- optimizer 调用：${usage.optimizerCalls}\n- 模型调用合计：${usage.totalModelCalls}\n- 运行墙钟时间：${(usage.wallTimeMs/1000).toFixed(1)} 秒\n- 原版 Skill：${usage.skillChars.original} 字符\n- 候选 Skill：${usage.skillChars.candidate ?? '未生成'}${usage.skillChars.candidate ? ` 字符（相对原版 ${usage.skillChars.candidate-usage.skillChars.original >= 0 ? '+' : ''}${usage.skillChars.candidate-usage.skillChars.original}）` : ''}\n`;
+  const markdown=`# Skill 评估报告\n\n运行：${id}\n\n模型模式：${adapter === 'mock' ? '模拟演示，分数不可用于判断实际能力' : `真实模型执行与模型评审（${adapter}）`}\n\n对比线路：${comparisonMode}\n\n结果：${status}\n${usageMarkdown}${effectivenessMarkdown}\n| 阶段 | 案例 | 公共任务评分 | Skill 合规评分 | 稳定性 | 确定性检查 |\n|---|---|---:|---:|---|---|\n${rows.join('\n')}\n\n每案例采样 ${config.samplesPerCase ?? 1} 次并使用中位数聚合；模型调用失败最多尝试 ${config.maxAttemptsPerCall ?? 1} 次。调用次数不等同于 token 或费用；不同 provider 的计费方式可能不同。证据缺失不会被记作 0 分，但会阻止候选通过。无 Skill 对比只使用公共任务评分和公共硬检查，Skill 特有约定单独报告。候选软分按数据集聚合后使用 ${(config.scoreTolerance ?? 0.05)*100} 个百分点容忍带，硬检查仍是一票否决。“样本不足”表示当前案例数不足以支持方向性结论。候选交付仍要求整体不低于原版。本文本任务小样本验证不代表技能自动触发、脚本执行或文件产物质量。保留集结果不用于本轮优化；若根据该结果改进，需要更换新的保留集。\n`;
   await save(path.join(runDir,'report.md'),markdown);
   await save(path.join(runDir,'status.md'),`# 运行状态\n\n- 状态：已结束\n- 结果：${status}\n- 更新时间：${new Date().toISOString()}\n\n查看同目录的 report.md。\n`);
   if (passed) {

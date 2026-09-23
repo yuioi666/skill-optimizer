@@ -11,6 +11,13 @@ test('确定性失败不得被高分掩盖',()=>{
   assert.equal(hard.failures.length,2);
   assert.equal(eligible([{id:'x',hard,score:1}],[{id:'x',score:0.5}],0.8),false);
 });
+test('确定性检查支持任选文本、正则、长度和 JSON Pointer',()=>{
+  assert.equal(checks('负责人：小林',{containsAny:['小吴','小林'],matches:['负责人[：:]'],notMatches:['已取消'],minChars:4}).passed,true);
+  const jsonResult=checks('{"status":"ok","owner":{"name":"小林"}}',{jsonEquals:[{path:'/status',value:'ok'},{path:'/owner/name',value:'小林'}]});
+  assert.equal(jsonResult.passed,true);
+  assert.match(checks('{"status":"bad"}',{jsonEquals:[{path:'/status',value:'ok'}]}).failures[0],/JSON 字段/);
+  assert.match(checks('not json',{jsonEquals:[{path:'/status',value:'ok'}]}).failures[0],/有效 JSON/);
+});
 test('软分按整体聚合并允许容忍带，硬检查仍否决',()=>{
   assert.equal(eligible([],[],0.8),false);
   assert.equal(eligible([{id:'x',hard:{passed:true},score:0.85}],[{id:'x',score:0.9}],0.8),false);
@@ -176,6 +183,8 @@ test('模拟流程端到端运行，保留集不进入优化器提示',async()=>
   assert.equal(report.noSkillDev.every(result=>result.skillHard === null),true);
   assert.equal(report.baselineDev.some(result=>result.skillHard !== null),true);
   assert.equal(report.holdout.length,1);
+  assert.deepEqual({runner:report.usage.runnerCalls,evaluator:report.usage.evaluatorCalls,optimizer:report.usage.optimizerCalls,total:report.usage.totalModelCalls},{runner:12,evaluator:12,optimizer:1,total:25});
+  assert.equal(report.usage.skillChars.original>0,true);
   const noSkillJudgePrompt=await readFile(path.join(runDir,'no-skill-development','dev-owner','evaluator','prompt.txt'),'utf8');
   const originalJudgePrompt=await readFile(path.join(runDir,'baseline-development','dev-owner','evaluator','prompt.txt'),'utf8');
   assert.equal(noSkillJudgePrompt.includes('统一填写“待确认”'),false);

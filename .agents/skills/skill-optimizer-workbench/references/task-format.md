@@ -19,6 +19,12 @@ holdout.jsonl
 - 案例的 `checks`：输入可推导的公共硬检查。
 - 案例的 `skillChecks`：Skill 特有约定，只检查原版和候选。
 
+`checks` 与 `skillChecks` 支持：`includes`（全部包含）、`containsAny`（至少包含一个）、`excludes`、`matches`、`notMatches`、`minChars`、`maxChars`，以及按 RFC 6901 路径检查 JSON 值的 `jsonEquals`。正则表达式使用 JavaScript Unicode 模式。结构化 JSON 示例：
+
+```json
+{"jsonEquals":[{"path":"/status","value":"ok"},{"path":"/owner/name","value":"小林"}]}
+```
+
 候选软分按整个数据集聚合，再用 `scoreTolerance` 容忍轻微评分波动；确定性检查仍可否决候选。`minComparisonCases` 控制方向性结论的最低案例数，未达到时报告“样本不足”，不会宣称 Skill 已被证明有效。
 
 `samplesPerCase` 控制每个案例独立运行次数，范围 1–5，使用中位数聚合；1 次节省调用，正式评估建议 3 次。`maxAttemptsPerCall` 控制单次 runner、evaluator 或 optimizer 调用失败后的最大尝试次数，范围 1–3。失败记录保留在对应角色目录；重试耗尽会标记证据缺失并阻止候选通过，不会把缺失当成 0 分。
