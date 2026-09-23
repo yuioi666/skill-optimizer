@@ -185,7 +185,7 @@ export async function callRole({ role, payload, adapter, dir, config, model, roo
   let result;
   if (role === 'optimizer') result = { skill:payload.skill + '\n行动项包含任务、负责人和截止时间。缺失的信息标为待确认。区分讨论和决定，保留原文否定。\n', rationale:'模拟改进：增加缺失信息和行动项规则。' };
   else if (role === 'runner') result = (payload.skill || '').includes('缺失的信息') ? '会议结论与行动项\n' + payload.input + '\n缺失信息：待确认。' : payload.skill ? '会议摘要：' + payload.input : '通用回答：' + payload.input;
-  else result = { scores:config.rubric.map(r => ({id:r.id, score:payload.output.includes('缺失信息：待确认') ? 4 : payload.output.startsWith('会议摘要：') ? 2 : 1, evidence:'模拟评分，仅验证控制流程。'})) };
+  else result = { scores:payload.rubric.map(r => ({id:r.id, score:payload.output.includes('缺失信息：待确认') ? 4 : payload.output.startsWith('会议摘要：') ? 2 : 1, evidence:'模拟评分，仅验证控制流程。'})) };
   await save(path.join(dir, 'output.json'), result);
   return result;
 }

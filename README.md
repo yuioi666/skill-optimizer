@@ -133,6 +133,8 @@ npm run optimize -- --job inputs/my-skill --iterations 1
 
 所选线路写入 `job.json`。报告使用相同 runner 和相同案例进行公平比较。包含候选的线路按“原版开发集与回归集 → 候选优化 → 候选开发集与回归集 → 冻结候选 → 保留集验收”执行。优化角色看不到回归集和保留集内容；保留集失败后本轮停止。
 
+无 Skill 对比只使用公共任务需求、公共评分维度和输入可推导的硬检查。`skillRequirements`、`skillRubric` 和案例中的 `skillChecks` 单独衡量 Skill 合规性，不参与无 Skill uplift，避免用只有 Skill 才规定的措辞压低无 Skill 得分。软分按数据集聚合，并通过 `scoreTolerance` 容忍轻微评分波动；案例数低于 `minComparisonCases` 时报告“样本不足”。
+
 以 5 个开发案例、4 个回归案例和 4 个保留案例为例，单轮全部通过时三个线路的最大调用量依次约为 52、53 和 79 次。候选提前被拒绝时不会继续消耗保留集调用。
 
 旧任务中的 `compareWithoutSkill: true` 仍兼容，会按 `all` 运行；新任务应使用 `comparisonMode`。

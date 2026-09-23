@@ -27,6 +27,7 @@ description: 在 Codex 桌面工作区中，根据用户需求创建测试集，
 ## 质量约束
 
 - 原始 Skill 永不覆盖。
+- 无 Skill 对比只能使用公共任务需求、公共 rubric 和输入可推导的硬检查；Skill 特有约定必须写入 `skillRequirements`、`skillRubric` 或 `skillChecks`，单独报告。
 - 优化角色只能看到需求、开发集和开发反馈。
 - 回归集用于拒绝退步，不作为优化提示。
 - 候选冻结后才运行保留集；失败即停止本轮。

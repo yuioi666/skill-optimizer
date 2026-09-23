@@ -17,8 +17,14 @@ export function validateSkill(text) {
 export async function loadJob(dir) {
   const config = await json(path.join(dir, 'job.json'));
   if (!config.name || typeof config.requirements !== 'string' || !config.requirements.trim()) throw Error('缺少名称或需求');
+  if(config.skillRequirements !== undefined && (typeof config.skillRequirements !== 'string' || !config.skillRequirements.trim())) throw Error('Skill 合规需求必须为非空字符串');
   if (!Array.isArray(config.rubric) || !config.rubric.length || config.rubric.some(c => !/^[a-z][a-z0-9_-]*$/.test(c.id) || !c.description) || new Set(config.rubric.map(c=>c.id)).size !== config.rubric.length) throw Error('评分标准无效');
+  if (config.skillRubric !== undefined && (!Array.isArray(config.skillRubric) || config.skillRubric.some(c => !/^[a-z][a-z0-9_-]*$/.test(c.id) || !c.description))) throw Error('Skill 合规评分标准无效');
+  const allRubricIds=[...config.rubric,...(config.skillRubric || [])].map(c=>c.id);
+  if(new Set(allRubricIds).size !== allRubricIds.length) throw Error('任务评分与 Skill 合规评分的 ID 不得重复');
   if (!(config.threshold > 0 && config.threshold <= 1) || !Number.isInteger(config.maxIterations) || config.maxIterations < 1 || config.maxIterations > 10 || !Number.isInteger(config.timeoutMs) || config.timeoutMs < 1000) throw Error('阈值、迭代次数或超时无效');
+  if (config.scoreTolerance !== undefined && (typeof config.scoreTolerance !== 'number' || !Number.isFinite(config.scoreTolerance) || config.scoreTolerance < 0 || config.scoreTolerance > 0.25)) throw Error('scoreTolerance 必须为 0–0.25');
+  if (config.minComparisonCases !== undefined && (!Number.isInteger(config.minComparisonCases) || config.minComparisonCases < 2)) throw Error('minComparisonCases 必须为不小于 2 的整数');
   if (config.comparisonMode !== undefined && !['skill-vs-none','original-vs-candidate','all'].includes(config.comparisonMode)) throw Error('comparisonMode 必须为 skill-vs-none、original-vs-candidate 或 all');
   if (config.compareWithoutSkill !== undefined && typeof config.compareWithoutSkill !== 'boolean') throw Error('compareWithoutSkill 必须为布尔值');
   if (typeof config.skill !== 'string' || path.isAbsolute(config.skill) || config.skill.split(/[\\/]/).includes('..')) throw Error('Skill 路径必须位于任务目录');
@@ -33,9 +39,11 @@ export async function loadJob(dir) {
       if (!/^[a-zA-Z0-9_-]+$/.test(c.id) || typeof c.input !== 'string' || !c.input.trim() || !c.checks) throw Error('案例格式无效');
       if (ids.has(c.id) || inputs.has(c.input.trim())) throw Error('案例 ID 或输入重复，可能发生测试集泄漏');
       ids.add(c.id); inputs.add(c.input.trim());
-      if (Object.keys(c.checks).some(k => !['includes','excludes','maxChars'].includes(k))) throw Error('未知确定性检查');
-      for (const k of ['includes','excludes']) if (c.checks[k] !== undefined && (!Array.isArray(c.checks[k]) || c.checks[k].some(v => typeof v !== 'string' || !v))) throw Error('检查词必须为非空字符串');
-      if (c.checks.maxChars !== undefined && (!Number.isInteger(c.checks.maxChars) || c.checks.maxChars < 1)) throw Error('maxChars 无效');
+      for(const rules of [c.checks,c.skillChecks].filter(Boolean)) {
+        if (Object.keys(rules).some(k => !['includes','excludes','maxChars'].includes(k))) throw Error('未知确定性检查');
+        for (const k of ['includes','excludes']) if (rules[k] !== undefined && (!Array.isArray(rules[k]) || rules[k].some(v => typeof v !== 'string' || !v))) throw Error('检查词必须为非空字符串');
+        if (rules.maxChars !== undefined && (!Number.isInteger(rules.maxChars) || rules.maxChars < 1)) throw Error('maxChars 无效');
+      }
     }
   }
   return { config, skill, sets };
@@ -85,21 +93,38 @@ export function grade(value, rubric) {
   }
   return value.scores.reduce((a, b) => a + b.score, 0) / (4 * rubric.length);
 }
-export function eligible(candidate, baseline, threshold) {
+const averageScore = (results,key='score') => results.reduce((sum,result)=>sum+result[key],0)/results.length;
+
+export function eligible(candidate, baseline, threshold, tolerance=0) {
   if (!candidate.length || candidate.length !== baseline.length || new Set(candidate.map(c=>c.id)).size !== candidate.length) return false;
-  return candidate.every(c => c.hard.passed && c.score >= threshold && c.score >= baseline.find(b => b.id === c.id)?.score);
+  const baselineIds=new Set(baseline.map(result=>result.id));
+  if(baselineIds.size !== baseline.length || candidate.some(result=>!baselineIds.has(result.id))) return false;
+  if(candidate.some(c=>!c.hard?.passed || !Number.isFinite(c.score)) || baseline.some(c=>!Number.isFinite(c.score))) return false;
+  if(averageScore(candidate) < threshold || averageScore(candidate) < averageScore(baseline)-tolerance) return false;
+  const candidateCompliance=candidate.filter(c=>Number.isFinite(c.skillScore));
+  const baselineCompliance=baseline.filter(c=>Number.isFinite(c.skillScore));
+  if(candidateCompliance.length || baselineCompliance.length) {
+    if(candidateCompliance.length !== candidate.length || baselineCompliance.length !== baseline.length) return false;
+    if(averageScore(candidateCompliance,'skillScore') < threshold || averageScore(candidateCompliance,'skillScore') < averageScore(baselineCompliance,'skillScore')-tolerance) return false;
+  }
+  return true;
 }
 
-export function compareResults(subject, baseline) {
+export function compareResults(subject, baseline, {tolerance=0.05,minCases=6}={}) {
   if (!Array.isArray(subject) || !Array.isArray(baseline) || subject.length !== baseline.length || !subject.length) throw Error('对比结果不完整');
   const baselineById = new Map(baseline.map(result => [result.id, result]));
   if (baselineById.size !== baseline.length || subject.some(result => !baselineById.has(result.id))) throw Error('对比结果案例不匹配');
+  if(subject.some(result=>!Number.isFinite(result.score)) || baseline.some(result=>!Number.isFinite(result.score))) throw Error('对比结果缺少有效评分');
   const average = results => results.reduce((sum, result) => sum + result.score, 0) / results.length;
-  const hardPasses = results => results.filter(result => result.hard.passed).length;
+  const hardPasses = results => results.filter(result => (result.taskHard || result.hard).passed).length;
   const subjectAverage = average(subject);
   const baselineAverage = average(baseline);
   const subjectHardPasses = hardPasses(subject);
   const baselineHardPasses = hardPasses(baseline);
+  let conclusion='inconclusive';
+  if(subject.length < minCases) conclusion='insufficient-sample';
+  else if(subjectHardPasses < baselineHardPasses || subjectAverage < baselineAverage-tolerance) conclusion='regressed';
+  else if(subjectHardPasses >= baselineHardPasses && subjectAverage > baselineAverage+tolerance) conclusion='improved';
   return {
     subjectAverage,
     baselineAverage,
@@ -107,6 +132,9 @@ export function compareResults(subject, baseline) {
     subjectHardPasses,
     baselineHardPasses,
     hardPassDelta: subjectHardPasses - baselineHardPasses,
-    observedUplift: subjectAverage > baselineAverage && subjectHardPasses >= baselineHardPasses
+    tolerance,
+    sampleSize:subject.length,
+    conclusion,
+    observedUplift: conclusion === 'improved'
   };
 }

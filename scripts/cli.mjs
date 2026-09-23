@@ -27,9 +27,16 @@ async function evaluate(cases, skill, dir, config, modelConfig, onProgress=async
     console.log(`  ${path.basename(dir)} / ${c.id}`);
     const common = { adapter, config, root, model:options.model, modelConfig };
     const output = await callRole({ ...common, role:'runner', payload:{skill,input:c.input}, dir:path.join(dir,c.id,'runner') });
-    const hard = checks(output, c.checks);
-    const judgment = await callRole({ ...common, role:'evaluator', payload:{input:c.input,output,requirements:config.requirements,rubric:config.rubric}, dir:path.join(dir,c.id,'evaluator') });
-    const result = { id:c.id, output, hard, score:grade(judgment,config.rubric), judgment };
+    const taskHard = checks(output, c.checks);
+    const skillHard = skill !== null && c.skillChecks ? checks(output,c.skillChecks) : null;
+    const hard={passed:taskHard.passed && (!skillHard || skillHard.passed),failures:[...taskHard.failures,...(skillHard?.failures || []).map(f=>`Skill 合规：${f}`)]};
+    const skillRubric=skill !== null ? config.skillRubric || [] : [];
+    const evaluationRubric=[...config.rubric,...skillRubric];
+    const evaluationRequirements=skill !== null && config.skillRequirements ? `${config.requirements}\n\nSkill 合规要求：${config.skillRequirements}` : config.requirements;
+    const judgment = await callRole({ ...common, role:'evaluator', payload:{input:c.input,output,requirements:evaluationRequirements,rubric:evaluationRubric}, dir:path.join(dir,c.id,'evaluator') });
+    grade(judgment,evaluationRubric);
+    const scoresFor=rubric=>({scores:judgment.scores.filter(score=>rubric.some(item=>item.id===score.id))});
+    const result = { id:c.id, output, hard, taskHard, skillHard, score:grade(scoresFor(config.rubric),config.rubric), skillScore:skillRubric.length ? grade(scoresFor(skillRubric),skillRubric) : null, judgment };
     results.push(result);
     await save(path.join(dir,c.id,'result.json'), result);
   }
@@ -57,8 +64,8 @@ async function run() {
   const visibleModels=modelConfig ? publicModelConfig(modelConfig) : {all:{type:adapter,model:options.model || process.env.MODEL_NAME || null}};
   await save(path.join(runDir,'manifest.json'), { id, adapter, models:visibleModels, config, skillHash:hash(job.skill), datasetHashes:Object.fromEntries(Object.entries(job.sets).map(([k,v])=>[k,hash(JSON.stringify(v))])), startedAt:new Date().toISOString() });
   await save(path.join(runDir,'original','SKILL.md'), job.skill);
-  // Keep an exact local snapshot for reproducibility, never include hidden data in optimizer prompts.
-  await save(path.join(runDir,'dataset-snapshot.json'),job.sets);
+  // Before candidate freeze, persist development data only. Hidden sets are represented by hashes.
+  await save(path.join(runDir,'dataset-snapshot.json'),{development:job.sets.development,regressionHash:hash(JSON.stringify(job.sets.regression)),holdoutHash:hash(JSON.stringify(job.sets.holdout))});
   const updateStatus=async(phase,detail='')=>save(path.join(runDir,'status.md'),`# 运行状态\n\n- 状态：运行中\n- 当前阶段：${phase}\n- 当前任务：${detail || '准备中'}\n- 更新时间：${new Date().toISOString()}\n\n## 模型角色\n\n${Object.entries(visibleModels).map(([role,value])=>`- ${role}：${value.type}${value.model ? ` / ${value.model}` : ''}`).join('\n')}\n`);
   await updateStatus('准备','配置和数据快照已保存');
   console.log(`运行目录：${runDir}\n模式：${adapter === 'mock' ? '模拟演示（不代表真实质量）' : `真实模型（${adapter}）`}`);
@@ -68,49 +75,56 @@ async function run() {
   const noSkillReg = compareWithoutSkill ? await evaluate(job.sets.regression,null,path.join(runDir,'no-skill-regression'),config,modelConfig,updateStatus) : null;
   const baselineDev = await evaluate(job.sets.development,job.skill,path.join(runDir,'baseline-development'),config,modelConfig,updateStatus);
   const baselineReg = await evaluate(job.sets.regression,job.skill,path.join(runDir,'baseline-regression'),config,modelConfig,updateStatus);
-  let skill = job.skill, feedback = baselineDev, selected = null;
+  const skill = job.skill;
+  let feedback = baselineDev, selected = null;
   const iterations = [];
   for (let n=1;optimizeCandidate && n<=config.maxIterations;n++) {
     console.log(`优化第 ${n} 轮`);
     const dir = path.join(runDir,`iteration-${n}`);
     await updateStatus(`第 ${n} 轮优化`,'optimizer');
-    const candidate = await callRole({role:'optimizer',payload:{skill,requirements:config.requirements,rubric:config.rubric,development:job.sets.development,feedback},adapter,dir:path.join(dir,'optimizer'),config,root,model:options.model,modelConfig});
+    const optimizationRequirements=config.skillRequirements ? `${config.requirements}\n\nSkill 合规要求：${config.skillRequirements}` : config.requirements;
+    const candidate = await callRole({role:'optimizer',payload:{skill,requirements:optimizationRequirements,rubric:[...config.rubric,...(config.skillRubric || [])],development:job.sets.development,feedback},adapter,dir:path.join(dir,'optimizer'),config,root,model:options.model,modelConfig});
     if (typeof candidate.skill !== 'string' || typeof candidate.rationale !== 'string') throw Error('优化器输出无效');
     validateSkill(candidate.skill);
     await save(path.join(dir,'candidate-skill','SKILL.md'),candidate.skill);
     const dev = await evaluate(job.sets.development,candidate.skill,path.join(dir,'development'),config,modelConfig,updateStatus);
     const reg = await evaluate(job.sets.regression,candidate.skill,path.join(dir,'regression'),config,modelConfig,updateStatus);
-    const accepted = eligible(dev,baselineDev,config.threshold) && eligible(reg,baselineReg,config.threshold);
+    const tolerance=config.scoreTolerance ?? 0.05;
+    const accepted = eligible(dev,baselineDev,config.threshold,tolerance) && eligible(reg,baselineReg,config.threshold,tolerance);
     iterations.push({iteration:n,rationale:candidate.rationale,dev,reg,accepted,skillHash:hash(candidate.skill)});
     if (accepted) { selected=candidate.skill; break; }
-    skill=candidate.skill;
     feedback=dev; // Regression contents and scores never enter the optimizer payload.
   }
   let holdout = null, baselineHoldout = null, noSkillHoldout = null, passed=false;
   if (comparisonMode === 'skill-vs-none') {
+    await save(path.join(runDir,'post-freeze-dataset-snapshot.json'),job.sets);
     noSkillHoldout = await evaluate(job.sets.holdout,null,path.join(runDir,'no-skill-holdout'),config,modelConfig,updateStatus);
     baselineHoldout = await evaluate(job.sets.holdout,job.skill,path.join(runDir,'baseline-holdout'),config,modelConfig,updateStatus);
   } else if (selected) {
     // Candidate is frozen before either holdout execution. No retry on holdout failure.
+    await save(path.join(runDir,'post-freeze-dataset-snapshot.json'),job.sets);
     noSkillHoldout = compareWithoutSkill ? await evaluate(job.sets.holdout,null,path.join(runDir,'no-skill-holdout'),config,modelConfig,updateStatus) : null;
     baselineHoldout = await evaluate(job.sets.holdout,job.skill,path.join(runDir,'baseline-holdout'),config,modelConfig,updateStatus);
     holdout = await evaluate(job.sets.holdout,selected,path.join(runDir,'selected-holdout'),config,modelConfig,updateStatus);
-    passed=eligible(holdout,baselineHoldout,config.threshold);
+    passed=eligible(holdout,baselineHoldout,config.threshold,config.scoreTolerance ?? 0.05);
   }
   const status = comparisonMode === 'skill-vs-none' ? 'effectiveness-measured' : passed ? 'passed' : selected ? 'holdout-failed' : 'no-qualified-candidate';
+  const comparisonOptions={tolerance:config.scoreTolerance ?? 0.05,minCases:config.minComparisonCases ?? 6};
   const effectiveness = compareWithoutSkill ? {
-    development:compareResults(baselineDev,noSkillDev),
-    regression:compareResults(baselineReg,noSkillReg),
-    holdout:noSkillHoldout && baselineHoldout ? compareResults(baselineHoldout,noSkillHoldout) : null
+    overall:compareResults([...baselineDev,...baselineReg,...(baselineHoldout || [])],[...noSkillDev,...noSkillReg,...(noSkillHoldout || [])],comparisonOptions),
+    development:compareResults(baselineDev,noSkillDev,comparisonOptions),
+    regression:compareResults(baselineReg,noSkillReg,comparisonOptions),
+    holdout:noSkillHoldout && baselineHoldout ? compareResults(baselineHoldout,noSkillHoldout,comparisonOptions) : null
   } : null;
   const report={id,adapter,status,comparisonMode,threshold:config.threshold,noSkillDev,noSkillReg,baselineDev,baselineReg,iterations,noSkillHoldout,baselineHoldout,holdout,effectiveness,finishedAt:new Date().toISOString()};
   await save(path.join(runDir,'report.json'),report);
   const rows=[];
   for (const [label,results] of [['无 Skill 开发集',noSkillDev],['原版开发集',baselineDev],['无 Skill 回归集',noSkillReg],['原版回归集',baselineReg],...iterations.flatMap(i=>[[`第 ${i.iteration} 轮开发集`,i.dev],[`第 ${i.iteration} 轮回归集`,i.reg]]),['无 Skill 保留集',noSkillHoldout],['原版保留集',baselineHoldout],['候选保留集',holdout]]) {
-    for (const r of results || []) rows.push(`| ${label} | ${r.id} | ${(r.score*100).toFixed(1)}% | ${r.hard.passed ? '通过' : r.hard.failures.join('；')} |`);
+    for (const r of results || []) rows.push(`| ${label} | ${r.id} | ${(r.score*100).toFixed(1)}% | ${Number.isFinite(r.skillScore) ? `${(r.skillScore*100).toFixed(1)}%` : '—'} | ${r.hard.passed ? '通过' : r.hard.failures.join('；')} |`);
   }
-  const effectivenessMarkdown = effectiveness ? `\n## 原版 Skill 相对无 Skill 的观测提升\n\n| 数据集 | 无 Skill 平均分 | 原版平均分 | 分数变化 | 硬性检查变化 | 观测到提升 |\n|---|---:|---:|---:|---:|---|\n${Object.entries(effectiveness).filter(([,value])=>value).map(([split,value])=>`| ${{development:'开发集',regression:'回归集',holdout:'保留集'}[split]} | ${(value.baselineAverage*100).toFixed(1)}% | ${(value.subjectAverage*100).toFixed(1)}% | ${(value.scoreDelta*100).toFixed(1)} 个百分点 | ${value.hardPassDelta >= 0 ? '+' : ''}${value.hardPassDelta} | ${value.observedUplift ? '是' : '否'} |`).join('\n')}\n` : '';
-  const markdown=`# Skill 评估报告\n\n运行：${id}\n\n模型模式：${adapter === 'mock' ? '模拟演示，分数不可用于判断实际能力' : `真实模型执行与模型评审（${adapter}）`}\n\n对比线路：${comparisonMode}\n\n结果：${status}\n${effectivenessMarkdown}\n| 阶段 | 案例 | 评分 | 确定性检查 |\n|---|---|---:|---|\n${rows.join('\n')}\n\n“观测到提升”表示原版平均分高于同模型无 Skill 基线，且硬性检查通过数未减少；它是当前案例中的证据，不代表所有场景。候选交付仍要求不低于原版。本文本任务小样本验证不代表技能自动触发、脚本执行或文件产物质量。模型评分存在波动。保留集结果不用于本轮优化；若根据该结果改进，需要更换新的保留集。\n`;
+  const conclusionLabel={improved:'提升',regressed:'退步',inconclusive:'差异不明确','insufficient-sample':'样本不足'};
+  const effectivenessMarkdown = effectiveness ? `\n## 原版 Skill 相对无 Skill 的观测结果\n\n| 数据集 | 案例数 | 无 Skill 平均分 | 原版平均分 | 分数变化 | 公共硬检查变化 | 结论 |\n|---|---:|---:|---:|---:|---:|---|\n${Object.entries(effectiveness).filter(([,value])=>value).map(([split,value])=>`| ${{overall:'总体',development:'开发集',regression:'回归集',holdout:'保留集'}[split]} | ${value.sampleSize} | ${(value.baselineAverage*100).toFixed(1)}% | ${(value.subjectAverage*100).toFixed(1)}% | ${(value.scoreDelta*100).toFixed(1)} 个百分点 | ${value.hardPassDelta >= 0 ? '+' : ''}${value.hardPassDelta} | ${conclusionLabel[value.conclusion]} |`).join('\n')}\n` : '';
+  const markdown=`# Skill 评估报告\n\n运行：${id}\n\n模型模式：${adapter === 'mock' ? '模拟演示，分数不可用于判断实际能力' : `真实模型执行与模型评审（${adapter}）`}\n\n对比线路：${comparisonMode}\n\n结果：${status}\n${effectivenessMarkdown}\n| 阶段 | 案例 | 公共任务评分 | Skill 合规评分 | 确定性检查 |\n|---|---|---:|---:|---|\n${rows.join('\n')}\n\n无 Skill 对比只使用公共任务评分和公共硬检查，Skill 特有约定单独报告。候选软分按数据集聚合后使用 ${(config.scoreTolerance ?? 0.05)*100} 个百分点容忍带，硬检查仍是一票否决。“样本不足”表示当前案例数不足以支持方向性结论。候选交付仍要求整体不低于原版。本文本任务小样本验证不代表技能自动触发、脚本执行或文件产物质量。保留集结果不用于本轮优化；若根据该结果改进，需要更换新的保留集。\n`;
   await save(path.join(runDir,'report.md'),markdown);
   await save(path.join(runDir,'status.md'),`# 运行状态\n\n- 状态：已结束\n- 结果：${status}\n- 更新时间：${new Date().toISOString()}\n\n查看同目录的 report.md。\n`);
   if (passed) {

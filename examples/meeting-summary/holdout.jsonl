@@ -1,1 +1,1 @@
-{"id":"hold-negation","input":"请整理会议记录。暂不启动广告投放。小赵负责整理用户反馈，截止时间还未确定。","checks":{"includes":["小赵","待确认"],"excludes":["决定启动广告投放","已启动广告投放"],"maxChars":1500}}
+{"id":"hold-negation","input":"请整理会议记录。暂不启动广告投放。小赵负责整理用户反馈，截止时间还未确定。","checks":{"includes":["小赵"],"excludes":["决定启动广告投放","已启动广告投放"],"maxChars":1500},"skillChecks":{"includes":["待确认"]}}

@@ -1,2 +1,2 @@
-{"id":"dev-owner","input":"请整理会议记录。已决定周五发布测试版。小林负责更新说明，周四前完成。回归测试需要安排，负责人和截止时间未定。","checks":{"includes":["小林","周四","待确认"],"excludes":["正式版发布成功"],"maxChars":1500}}
-{"id":"dev-undecided","input":"请整理会议记录。会上讨论了更换供应商，尚未决定。老周下周二提交报价对比。培训计划还没确定负责人，也没定时间。","checks":{"includes":["老周","下周二","待确认"],"excludes":["决定更换供应商","已更换供应商"],"maxChars":1500}}
+{"id":"dev-owner","input":"请整理会议记录。已决定周五发布测试版。小林负责更新说明，周四前完成。回归测试需要安排，负责人和截止时间未定。","checks":{"includes":["小林","周四"],"excludes":["正式版发布成功"],"maxChars":1500},"skillChecks":{"includes":["待确认"]}}
+{"id":"dev-undecided","input":"请整理会议记录。会上讨论了更换供应商，尚未决定。老周下周二提交报价对比。培训计划还没确定负责人，也没定时间。","checks":{"includes":["老周","下周二"],"excludes":["决定更换供应商","已更换供应商"],"maxChars":1500},"skillChecks":{"includes":["待确认"]}}

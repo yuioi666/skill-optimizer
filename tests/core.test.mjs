@@ -11,18 +11,24 @@ test('确定性失败不得被高分掩盖',()=>{
   assert.equal(hard.failures.length,2);
   assert.equal(eligible([{id:'x',hard,score:1}],[{id:'x',score:0.5}],0.8),false);
 });
-test('逐案例阻止退步，拒绝缺失基线',()=>{
+test('软分按整体聚合并允许容忍带，硬检查仍否决',()=>{
   assert.equal(eligible([],[],0.8),false);
   assert.equal(eligible([{id:'x',hard:{passed:true},score:0.85}],[{id:'x',score:0.9}],0.8),false);
+  assert.equal(eligible([{id:'a',hard:{passed:true},score:0.8},{id:'b',hard:{passed:true},score:1}],[{id:'a',score:0.9},{id:'b',score:0.85}],0.8,0.05),true);
+  assert.equal(eligible([{id:'a',hard:{passed:false},score:1},{id:'b',hard:{passed:true},score:1}],[{id:'a',score:0.9},{id:'b',score:0.9}],0.8,0.05),false);
+  assert.equal(eligible([{id:'a',hard:{passed:true},score:1,skillScore:0.7}],[{id:'a',score:0.9,skillScore:0.9}],0.8,0.05),false);
   assert.equal(eligible([{id:'x',hard:{passed:true},score:1}],[],0.8),false);
+  assert.equal(eligible([{id:'x',hard:{passed:true},score:1}],[{id:'y',score:0.9}],0.8,0.05),false);
 });
 test('无 Skill 对比报告分数和硬性检查变化',()=>{
   const noSkill=[{id:'a',score:0.5,hard:{passed:true}},{id:'b',score:0.5,hard:{passed:false}}];
   const original=[{id:'a',score:0.75,hard:{passed:true}},{id:'b',score:0.75,hard:{passed:true}}];
   assert.deepEqual(compareResults(original,noSkill),{
     subjectAverage:0.75,baselineAverage:0.5,scoreDelta:0.25,
-    subjectHardPasses:2,baselineHardPasses:1,hardPassDelta:1,observedUplift:true
+    subjectHardPasses:2,baselineHardPasses:1,hardPassDelta:1,tolerance:0.05,
+    sampleSize:2,conclusion:'insufficient-sample',observedUplift:false
   });
+  assert.equal(compareResults(original,noSkill,{minCases:2}).conclusion,'improved');
   assert.throws(()=>compareResults(original,[noSkill[0]]),/不完整/);
 });
 test('评审必须覆盖全部维度且给出有效评分证据',()=>{
@@ -86,11 +92,38 @@ test('模拟流程端到端运行，保留集不进入优化器提示',async()=>
   assert.equal(report.status,'passed');
   assert.equal(report.adapter,'mock');
   assert.equal(report.noSkillDev.length,2);
-  assert.equal(report.effectiveness.development.observedUplift,true);
+  assert.equal(report.effectiveness.development.conclusion,'insufficient-sample');
+  assert.equal(report.noSkillDev.every(result=>result.skillHard === null),true);
+  assert.equal(report.baselineDev.some(result=>result.skillHard !== null),true);
   assert.equal(report.holdout.length,1);
+  const noSkillJudgePrompt=await readFile(path.join(runDir,'no-skill-development','dev-owner','evaluator','prompt.txt'),'utf8');
+  const originalJudgePrompt=await readFile(path.join(runDir,'baseline-development','dev-owner','evaluator','prompt.txt'),'utf8');
+  assert.equal(noSkillJudgePrompt.includes('统一填写“待确认”'),false);
+  assert.equal(noSkillJudgePrompt.includes('skill_conventions'),false);
+  assert.equal(originalJudgePrompt.includes('统一填写“待确认”'),true);
+  assert.equal(originalJudgePrompt.includes('skill_conventions'),true);
+  const snapshot=JSON.parse(await readFile(path.join(runDir,'dataset-snapshot.json'),'utf8'));
+  assert.equal(Array.isArray(snapshot.development),true);
+  assert.equal(snapshot.regression,undefined);
+  assert.equal(snapshot.holdout,undefined);
+  const frozen=JSON.parse(await readFile(path.join(runDir,'post-freeze-dataset-snapshot.json'),'utf8'));
+  assert.equal(Array.isArray(frozen.holdout),true);
   const prompt=await readFile(path.join(runDir,'iteration-1','optimizer','prompt.txt'),'utf8');
   const job=await loadJob('examples/meeting-summary');
   for(const c of [...job.sets.regression,...job.sets.holdout]) assert.equal(prompt.includes(c.input),false);
+});
+test('被拒候选不会成为下一轮优化基底',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'skill-rejected-base-'));
+  await cp('examples/meeting-summary',dir,{recursive:true});
+  const developmentPath=path.join(dir,'development.jsonl');
+  const cases=(await readFile(developmentPath,'utf8')).trim().split(/\r?\n/).map(JSON.parse);
+  for(const item of cases) item.skillChecks={includes:['永远不会出现']};
+  await writeFile(developmentPath,cases.map(item=>JSON.stringify(item)).join('\n')+'\n');
+  const result=spawnSync(process.execPath,['scripts/cli.mjs','run','--adapter','mock','--job',dir,'--iterations','2'],{encoding:'utf8',timeout:30000});
+  assert.equal(result.status,2,result.stderr);
+  const runDir=result.stdout.match(/运行目录：([^\r\n]+)/)[1];
+  const secondPrompt=await readFile(path.join(runDir,'iteration-2','optimizer','prompt.txt'),'utf8');
+  assert.equal(secondPrompt.includes('行动项包含任务、负责人和截止时间。'),false);
 });
 test('真实优化必须明确指定 inputs 任务目录',()=>{
   const result=spawnSync(process.execPath,['scripts/cli.mjs','run','--adapter','codex'],{encoding:'utf8',timeout:10000});
