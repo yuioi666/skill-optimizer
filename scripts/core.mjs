@@ -1,10 +1,11 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, access, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
 export const read = p => readFile(p, 'utf8');
 export const json = async p => JSON.parse(await read(p));
 export const hash = s => createHash('sha256').update(s).digest('hex');
+const safeRelativePath = value => typeof value === 'string' && value.length > 0 && !path.isAbsolute(value) && !value.split(/[\\/]/).includes('..');
 export async function save(p, value) {
   await mkdir(path.dirname(p), { recursive: true });
   await writeFile(p, typeof value === 'string' ? value : JSON.stringify(value, null, 2) + '\n');
@@ -28,6 +29,7 @@ export async function loadJob(dir) {
   if (config.samplesPerCase !== undefined && (!Number.isInteger(config.samplesPerCase) || config.samplesPerCase < 1 || config.samplesPerCase > 5)) throw Error('samplesPerCase 必须为 1–5 的整数');
   if (config.maxAttemptsPerCall !== undefined && (!Number.isInteger(config.maxAttemptsPerCall) || config.maxAttemptsPerCall < 1 || config.maxAttemptsPerCall > 3)) throw Error('maxAttemptsPerCall 必须为 1–3 的整数');
   if (config.comparisonMode !== undefined && !['skill-vs-none','original-vs-candidate','all'].includes(config.comparisonMode)) throw Error('comparisonMode 必须为 skill-vs-none、original-vs-candidate 或 all');
+  if (config.executionMode !== undefined && !['text','workspace'].includes(config.executionMode)) throw Error('executionMode 必须为 text 或 workspace');
   if (config.compareWithoutSkill !== undefined && typeof config.compareWithoutSkill !== 'boolean') throw Error('compareWithoutSkill 必须为布尔值');
   if (typeof config.skill !== 'string' || path.isAbsolute(config.skill) || config.skill.split(/[\\/]/).includes('..')) throw Error('Skill 路径必须位于任务目录');
   const skill = await read(path.join(dir, config.skill));
@@ -41,6 +43,28 @@ export async function loadJob(dir) {
       if (!/^[a-zA-Z0-9_-]+$/.test(c.id) || typeof c.input !== 'string' || !c.input.trim() || !c.checks) throw Error('案例格式无效');
       if (ids.has(c.id) || inputs.has(c.input.trim())) throw Error('案例 ID 或输入重复，可能发生测试集泄漏');
       ids.add(c.id); inputs.add(c.input.trim());
+      if(c.activationExpectation !== undefined && !['explicit','implicit','negative'].includes(c.activationExpectation)) throw Error('activationExpectation 必须为 explicit、implicit 或 negative');
+      if(c.fixture !== undefined && !safeRelativePath(c.fixture)) throw Error('fixture 必须是任务目录内的相对路径');
+      if(c.fixture !== undefined) {
+        let fixtureStat;
+        try { fixtureStat=await stat(path.resolve(dir,c.fixture)); } catch { throw Error(`fixture 不存在：${c.fixture}`); }
+        if(!fixtureStat.isDirectory()) throw Error(`fixture 必须是目录：${c.fixture}`);
+      }
+      if(c.workspaceChecks !== undefined) {
+        if(!c.workspaceChecks || typeof c.workspaceChecks !== 'object' || Array.isArray(c.workspaceChecks)) throw Error('workspaceChecks 必须是对象');
+        const allowed=new Set(['exists','notExists','fileIncludes','fileExcludes','commandsInclude','commandsExclude','maxCommands']);
+        if(Object.keys(c.workspaceChecks).some(key=>!allowed.has(key))) throw Error('未知工作区检查');
+        for(const key of ['exists','notExists','commandsInclude','commandsExclude']) {
+          const values=c.workspaceChecks[key];
+          if(values !== undefined && (!Array.isArray(values) || !values.length || values.some(value=>typeof value !== 'string' || !value || ((key === 'exists' || key === 'notExists') && !safeRelativePath(value))))) throw Error(`${key} 必须为非空字符串数组`);
+        }
+        for(const key of ['fileIncludes','fileExcludes']) {
+          const values=c.workspaceChecks[key];
+          if(values !== undefined && (!Array.isArray(values) || !values.length || values.some(item=>!item || !safeRelativePath(item.path) || !Array.isArray(item.values) || !item.values.length || item.values.some(value=>typeof value !== 'string' || !value)))) throw Error(`${key} 格式无效`);
+        }
+        if(c.workspaceChecks.maxCommands !== undefined && (!Number.isInteger(c.workspaceChecks.maxCommands) || c.workspaceChecks.maxCommands < 0)) throw Error('maxCommands 必须为非负整数');
+      }
+      if(config.executionMode === 'workspace' && (!c.workspaceChecks || !Object.keys(c.workspaceChecks).length)) throw Error('workspace 模式的每个案例都必须提供非空 workspaceChecks');
       for(const rules of [c.checks,c.skillChecks].filter(Boolean)) {
         if (Object.keys(rules).some(k => !['includes','containsAny','excludes','matches','notMatches','jsonEquals','minChars','maxChars'].includes(k))) throw Error('未知确定性检查');
         for (const k of ['includes','containsAny','excludes','matches','notMatches']) if (rules[k] !== undefined && (!Array.isArray(rules[k]) || !rules[k].length || rules[k].some(v => typeof v !== 'string' || !v))) throw Error('检查词或正则必须为非空字符串数组');
@@ -53,6 +77,38 @@ export async function loadJob(dir) {
     }
   }
   return { config, skill, sets };
+}
+
+export async function workspaceChecks(workspace, traceText, rules={}) {
+  const failures=[];
+  const resolveSafe=relative=>{
+    if(!safeRelativePath(relative)) throw Error(`不安全的工作区路径：${relative}`);
+    const target=path.resolve(workspace,relative);
+    if(target !== path.resolve(workspace) && !target.startsWith(path.resolve(workspace)+path.sep)) throw Error(`路径越出工作区：${relative}`);
+    return target;
+  };
+  const present=async relative=>{ try { await access(resolveSafe(relative)); return true; } catch { return false; } };
+  for(const relative of rules.exists || []) if(!await present(relative)) failures.push(`缺少文件：${relative}`);
+  for(const relative of rules.notExists || []) if(await present(relative)) failures.push(`出现了禁止文件：${relative}`);
+  for(const [key,verb] of [['fileIncludes','缺少内容'],['fileExcludes','包含禁止内容']]) for(const item of rules[key] || []) {
+    let content;
+    try { content=await readFile(resolveSafe(item.path),'utf8'); }
+    catch { failures.push(`无法读取文件：${item.path}`); continue; }
+    for(const value of item.values) {
+      const bad=key === 'fileIncludes' ? !content.includes(value) : content.includes(value);
+      if(bad) failures.push(`${item.path} ${verb}：${value}`);
+    }
+  }
+  const events=String(traceText || '').split(/\r?\n/).filter(Boolean).flatMap(line=>{try{return [JSON.parse(line)];}catch{return [];}});
+  const commandEvents=events.filter(event=>(event.type === 'item.started' || event.type === 'item.completed') && event.item?.type === 'command_execution' && typeof event.item.command === 'string');
+  const completedCommands=commandEvents.filter(event=>event.type === 'item.completed').map(event=>event.item.command);
+  const commands=completedCommands.length ? completedCommands : commandEvents.filter(event=>event.type === 'item.started').map(event=>event.item.command);
+  const observedCommands=commandEvents.map(event=>event.item.command);
+  for(const value of rules.commandsInclude || []) if(!observedCommands.some(command=>command.includes(value))) failures.push(`未执行预期命令：${value}`);
+  for(const value of rules.commandsExclude || []) if(observedCommands.some(command=>command.includes(value))) failures.push(`执行了禁止命令：${value}`);
+  if(rules.maxCommands !== undefined && commands.length > rules.maxCommands) failures.push(`命令次数 ${commands.length} 超过上限 ${rules.maxCommands}`);
+  const tokenUsage=events.filter(event=>event.type === 'turn.completed' && event.usage).reduce((sum,event)=>({inputTokens:sum.inputTokens+(Number(event.usage.input_tokens)||0),outputTokens:sum.outputTokens+(Number(event.usage.output_tokens)||0),cachedInputTokens:sum.cachedInputTokens+(Number(event.usage.cached_input_tokens)||0)}),{inputTokens:0,outputTokens:0,cachedInputTokens:0});
+  return {passed:failures.length === 0,failures,commands,tokenUsage};
 }
 export async function loadModelConfig(file) {
   const config=await json(file);

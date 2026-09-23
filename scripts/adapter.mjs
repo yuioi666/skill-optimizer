@@ -23,11 +23,11 @@ function contentText(content) {
   return '';
 }
 
-export async function codexCall({ prompt, schema, dir, timeoutMs = 180000, model }) {
+export async function codexCall({ prompt, schema, dir, timeoutMs = 180000, model, cwd=dir, sandbox='read-only', executable=process.env.CODEX_BIN || 'codex', executableArgs=[] }) {
   await save(path.join(dir, 'prompt.txt'), prompt);
   if (schema) await save(path.join(dir, 'schema.json'), schema);
   const output = path.resolve(dir, 'output.txt');
-  const args = ['exec', '--json', '--ephemeral', '--skip-git-repo-check', '--sandbox', 'read-only', '--color', 'never', '-C', path.resolve(dir), '-o', output];
+  const args = [...executableArgs,'exec', '--json', '--ephemeral', '--skip-git-repo-check', '--sandbox', sandbox, '--color', 'never', '-C', path.resolve(cwd), '-o', output];
   if (schema) args.push('--output-schema', path.resolve(dir, 'schema.json'));
   if (model) args.push('--model', model);
   args.push('-');
@@ -35,7 +35,7 @@ export async function codexCall({ prompt, schema, dir, timeoutMs = 180000, model
   let stdout = '', stderr = '';
   try {
     await new Promise((resolve, reject) => {
-      const child = spawn(process.env.CODEX_BIN || 'codex', args, { shell:false, windowsHide:true, stdio:['pipe','pipe','pipe'] });
+      const child = spawn(executable, args, { shell:false, windowsHide:true, stdio:['pipe','pipe','pipe'] });
       let timedOut = false;
       const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
       child.stdout.on('data', d => { stdout += d; });
@@ -51,8 +51,16 @@ export async function codexCall({ prompt, schema, dir, timeoutMs = 180000, model
   } finally {
     await save(path.join(dir, 'trace.jsonl'), stdout);
     await save(path.join(dir, 'stderr.log'), stderr);
-    await save(path.join(dir, 'execution.json'), { elapsedMs: Date.now()-start, executable:process.env.CODEX_BIN || 'codex', args });
+    await save(path.join(dir, 'execution.json'), { elapsedMs: Date.now()-start, executable, args });
   }
+}
+
+export async function callWorkspaceRunner({ prompt, dir, workspace, config, model, modelConfig }) {
+  const roleSetting=modelConfig?.roles?.runner;
+  const providerConfig=roleSetting ? modelConfig.providers[roleSetting.provider] : undefined;
+  const roleAdapter=providerConfig?.type || 'codex';
+  if(roleAdapter !== 'codex') throw Error('workspace 模式的 runner 必须使用 codex provider，以便执行工具并记录 JSONL trace');
+  return codexCall({prompt,dir,cwd:workspace,sandbox:'workspace-write',timeoutMs:config.timeoutMs,model:roleSetting?.model || model || providerConfig?.model});
 }
 
 export async function openAICompatibleCall({ prompt, schema, dir, timeoutMs = 180000, model, baseUrl=process.env.MODEL_BASE_URL, apiKey=process.env.MODEL_API_KEY, structured=process.env.MODEL_STRUCTURED_OUTPUT || 'prompt' }) {

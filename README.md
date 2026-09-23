@@ -47,7 +47,7 @@ inputs/my-skill/
 └─ holdout.jsonl
 ```
 
-`inputs/` 下的用户材料默认不提交 Git。当前执行引擎主要验证 `SKILL.md` 的文本行为；需要脚本、工具和文件产物的 Skill，必须由 Codex 为其增加隔离项目测试，不能仅凭文本评测宣布通过。
+`inputs/` 下的用户材料默认不提交 Git。纯文本 Skill 使用默认的 `executionMode: "text"`。涉及脚本、工具或文件产物时，设置 `executionMode: "workspace"`；引擎会为每次样本创建临时项目副本，安装对应版本的 Skill，执行真实 Codex 任务并检查 JSONL 命令 trace 与文件产物。workspace 模式要求 `runner` 使用 `codex` provider，优化器和评审器仍可使用第三方模型。
 
 ## 配置每个角色的模型
 
@@ -138,7 +138,9 @@ npm run optimize -- --job inputs/my-skill --iterations 1
 
 `samplesPerCase` 可设为 1–5。每案例运行多次后使用中位数评分，并在报告中标出波动；省调用时使用 1，正式评估建议使用 3。`maxAttemptsPerCall` 可设为 1–3，模型调用或结构化结果异常时有限重试，重试耗尽会记录为证据缺失并阻止候选交付。
 
-确定性检查支持全部包含、任选包含、排除内容、正则、长度范围和 JSON Pointer 字段值。报告同时记录各角色实际调用次数、运行耗时以及原版和候选 Skill 的字符数；调用次数用于观察成本变化，但不冒充 provider 的 token 或费用数据。
+确定性检查支持全部包含、任选包含、排除内容、正则、长度范围和 JSON Pointer 字段值。workspace 模式另外支持文件存在/禁止存在、文件内容包含/排除、命令包含/排除和最大命令次数。案例可用 `activationExpectation` 标记显式触发、隐式触发和负向控制。由于当前评测不依赖未承诺稳定的内部加载事件，报告会把它表述为由行为和产物支持的触发结论。详细格式见 [.agents/skills/skill-optimizer-workbench/references/task-format.md](.agents/skills/skill-optimizer-workbench/references/task-format.md)。
+
+报告同时记录各角色实际调用次数、运行耗时以及原版和候选 Skill 的字符数；workspace 模式还会汇总 Codex runner 在 `turn.completed` 事件中报告的输入、缓存输入和输出 token。其他 provider 的调用次数不冒充 token 或费用数据。
 
 以 5 个开发案例、4 个回归案例和 4 个保留案例为例，每案例采样 1 次且单轮全部通过时，三个线路的基础调用量依次约为 52、53 和 79 次；采样 3 次时约为 156、157 和 235 次。若 `maxAttemptsPerCall` 为 2，只有调用异常时才会重试，理论上限为基础调用量的两倍。候选提前被拒绝时不会继续消耗保留集调用。
 
@@ -157,3 +159,5 @@ npm run optimize -- --job inputs/my-skill --iterations 1
 当前版本保持本地、轻量、无数据库，不要求用户另开评测平台。后续如果需要完整的项目夹具、工具调用断言和 Web 评测矩阵，优先考虑接入 Agent Skill Evals 与 Promptfoo，而不是重复实现。
 
 Codex 桌面端子 Agent 和项目 Agent 配置依据 [OpenAI 官方子 Agent 文档](https://learn.chatgpt.com/docs/agent-configuration/subagents)，仓库 Skill 依据 [OpenAI 官方 Skill 文档](https://learn.chatgpt.com/docs/build-skills)。
+
+工作区执行与 trace 检查参考 [OpenAI 官方 Skill eval 指南](https://developers.openai.com/blog/eval-skills)：用 `codex exec --json` 保存结构化事件，并结合命令、文件、构建和结构化评审检查实际行为。

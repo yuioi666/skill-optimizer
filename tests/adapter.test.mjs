@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, readFile } from 'node:fs/promises';
-import { anthropicCall, commandCall, objectSchema, openAICompatibleCall, parseJsonAnswer } from '../scripts/adapter.mjs';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { anthropicCall, callWorkspaceRunner, codexCall, commandCall, objectSchema, openAICompatibleCall, parseJsonAnswer } from '../scripts/adapter.mjs';
 
 test('解析纯 JSON 和 Markdown JSON 代码块',()=>{
   assert.deepEqual(parseJsonAnswer('{"ok":true}'),{ok:true});
@@ -41,6 +41,22 @@ test('通用命令行 adapter 通过 stdin 调用模型程序',async()=>{
   const result=await commandCall({prompt:'test',schema:objectSchema({ok:{type:'boolean'}}),dir,command:process.execPath,commandArgs:['-e',program],timeoutMs:10000});
   assert.deepEqual(result,{ok:true});
   assert.match(await readFile(path.join(dir,'prompt.txt'),'utf8'),/Return only JSON/);
+});
+
+test('工作区 runner 拒绝无工具能力的第三方 provider',async()=>{
+  const modelConfig={providers:{local:{type:'openai-compatible'}},roles:{runner:{provider:'local'}}};
+  await assert.rejects(callWorkspaceRunner({prompt:'test',dir:'x',workspace:'x',config:{timeoutMs:1000},modelConfig}),/必须使用 codex provider/);
+});
+
+test('Codex workspace 调用使用可写沙箱、指定目录并保留 trace',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'skill-codex-call-'));
+  const workspace=await mkdtemp(path.join(os.tmpdir(),'skill-codex-workspace-'));
+  const fake=path.join(dir,'fake-codex.mjs');
+  await writeFile(fake,`import {writeFileSync} from 'node:fs';\nconst args=process.argv.slice(2);\nconst output=args[args.indexOf('-o')+1];\nif(args[args.indexOf('--sandbox')+1]!=='workspace-write') process.exit(2);\nif(args[args.indexOf('-C')+1]!==${JSON.stringify(workspace)}) process.exit(3);\nwriteFileSync(output,'done');\nprocess.stdout.write(JSON.stringify({type:'turn.completed',usage:{input_tokens:7,output_tokens:2}})+'\\n');\n`);
+  const result=await codexCall({prompt:'create',dir,workspace,cwd:workspace,sandbox:'workspace-write',executable:process.execPath,executableArgs:[fake]});
+  assert.equal(result,'done');
+  assert.match(await readFile(path.join(dir,'trace.jsonl'),'utf8'),/turn.completed/);
+  assert.match(await readFile(path.join(dir,'execution.json'),'utf8'),/workspace-write/);
 });
 
 test('Anthropic adapter 使用 Messages API 且不记录密钥',async t=>{

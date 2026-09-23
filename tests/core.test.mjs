@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, cp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, cp, readFile, writeFile, mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { checks, grade, eligible, loadJob, loadModelConfig, publicModelConfig, compareResults, median } from '../scripts/core.mjs';
+import { checks, workspaceChecks, grade, eligible, loadJob, loadModelConfig, publicModelConfig, compareResults, median } from '../scripts/core.mjs';
 
 test('确定性失败不得被高分掩盖',()=>{
   const hard=checks('已启动广告投放',{includes:['待确认'],excludes:['已启动广告投放']});
@@ -17,6 +17,17 @@ test('确定性检查支持任选文本、正则、长度和 JSON Pointer',()=>{
   assert.equal(jsonResult.passed,true);
   assert.match(checks('{"status":"bad"}',{jsonEquals:[{path:'/status',value:'ok'}]}).failures[0],/JSON 字段/);
   assert.match(checks('not json',{jsonEquals:[{path:'/status',value:'ok'}]}).failures[0],/有效 JSON/);
+});
+test('工作区检查验证文件产物和 JSONL 命令事件',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'skill-workspace-checks-'));
+  await mkdir(path.join(dir,'src'));
+  await writeFile(path.join(dir,'src','app.js'),'console.log("ready")');
+  const trace=[{type:'item.completed',item:{type:'command_execution',command:'npm install'}},{type:'turn.completed',usage:{input_tokens:10,output_tokens:5}}].map(JSON.stringify).join('\n');
+  const result=await workspaceChecks(dir,trace,{exists:['src/app.js'],notExists:['debug.log'],fileIncludes:[{path:'src/app.js',values:['ready']}],fileExcludes:[{path:'src/app.js',values:['TODO']}],commandsInclude:['npm install'],commandsExclude:['rm -rf'],maxCommands:1});
+  assert.equal(result.passed,true);
+  assert.deepEqual(result.commands,['npm install']);
+  assert.deepEqual(result.tokenUsage,{inputTokens:10,outputTokens:5,cachedInputTokens:0});
+  assert.equal((await workspaceChecks(dir,trace,{exists:['missing.txt']})).passed,false);
 });
 test('软分按整体聚合并允许容忍带，硬检查仍否决',()=>{
   assert.equal(eligible([],[],0.8),false);
@@ -92,6 +103,19 @@ test('采样次数和重试次数有安全上限',async()=>{
   config.maxAttemptsPerCall=4;
   await writeFile(path.join(dir,'job.json'),JSON.stringify(config));
   await assert.rejects(loadJob(dir),/maxAttemptsPerCall/);
+});
+test('workspace 模式要求每个案例声明工作区检查',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'skill-workspace-job-'));
+  await cp('examples/meeting-summary',dir,{recursive:true});
+  const config=JSON.parse(await readFile(path.join(dir,'job.json'),'utf8'));
+  config.executionMode='workspace';
+  await writeFile(path.join(dir,'job.json'),JSON.stringify(config));
+  await assert.rejects(loadJob(dir),/workspaceChecks/);
+  const development=path.join(dir,'development.jsonl');
+  const cases=(await readFile(development,'utf8')).trim().split(/\r?\n/).map(JSON.parse);
+  cases[0].workspaceChecks={exists:['../outside']};
+  await writeFile(development,cases.map(JSON.stringify).join('\n')+'\n');
+  await assert.rejects(loadJob(dir),/exists/);
 });
 test('仅测 Skill 有效性时不调用优化器或生成候选',async()=>{
   const dir=await mkdtemp(path.join(os.tmpdir(),'skill-effectiveness-'));
